@@ -1,0 +1,370 @@
+UNI Exam Invigilation Scheduler
+Conclusion And Walkthrough
+
+1. What This App Does
+
+This web application is an exam invigilation scheduling system for academic environments.
+It is designed to manage exam sessions, staff availability, manual assignment, and automatic assignment.
+
+Main stack:
+- Frontend: React
+- Backend: Node.js with Express
+- Data storage: local store with backend APIs
+- Optimization: Python OR-Tools auto-scheduling
+- Excel support: import, export, and template generation
+
+The app supports:
+- Session setup with TA need and Doctor need
+- Staff setup with role, load type, department, and max hours
+- Engagement periods that block staff from assignment
+- Manual scheduling through a calendar-style scheduling page
+- Auto scheduling through OR-Tools
+- Super invigilator handling
+- Control session handling
+- Workload monitoring
+- Excel import/export and templates
+
+
+2. Main Tabs
+
+Dashboard
+- Shows a high-level summary of the system
+- Useful for quick monitoring
+
+Sessions
+- Create and manage exam sessions
+- Each session includes:
+  - one or more course codes
+  - room
+  - date
+  - start time
+  - end time
+  - TA needed
+  - Doctor needed
+  - notes
+- Includes:
+  - Sessions Excel template, import, and export
+  - Session Needs Excel template, import, and export
+  - remove all
+- Course handling:
+  - A session is the room/date/time block
+  - If multiple rows have the same Room, Date, Start, and End, the app merges them into one session
+  - The course codes from merged rows are stored together on that session
+  - A session can contain one course code or multiple course codes
+  - Enter multiple course codes separated by semicolon, comma, or new line
+  - Example:
+    CIE301; MTH204
+  - The same course code can also appear in more than one session if it is split across rooms or periods
+
+Invigilators
+- Create and manage staff
+- Each staff member includes:
+  - Staff ID
+  - name
+  - role: TA or Doctor
+  - load type
+  - department
+  - max hours
+  - notes
+- Includes:
+  - Excel template download
+  - Excel import
+  - Excel export
+  - remove all
+
+Engagements
+- Add blocked periods for staff
+- Prevents assignment during unavailable times
+- Includes:
+  - Excel template download
+  - Excel import
+  - Excel export
+  - remove all
+
+Scheduling
+- Main assignment page
+- Shows sessions in a calendar-like time grid
+- Allows:
+  - manual assignment of TA and Doctor
+  - full workbook Excel import
+  - full workbook Excel export
+  - workbook template download
+  - OR-Tools auto scheduling
+  - remove all session assignments
+- The assignment panel appears only when a session is selected
+
+Room Capability
+- Checks whether room assumptions are operationally valid before assignment
+- Import:
+  - Sessions: Room, CourseCode, Date, Start, End
+  - Course Schedule: CourseCode, Students, Date, Start, End
+  - Room Capacity: Room, MinorSubjectCap, MajorCap
+- The tab merges session rows by Room, Date, Start, and End
+- It reports:
+  - allocated students per room session
+  - derived room capacity from MinorSubjectCap + MajorCap
+  - allowed capacity with 10% overflow
+  - capacity label: Under Cap, Suitable Cap, Over Cap, or Over Limit
+  - subject split label: largest subject against MinorSubjectCap and all other subjects against MajorCap
+  - over-capacity sessions
+  - course capacity shortages when the combined rooms cannot hold all students
+  - missing course sizes
+  - missing room capacities
+  - room time conflicts
+  - course time conflicts
+- Includes templates and Excel report export
+- If one course appears in more than one room at the same date and time, the tab spreads that course enrollment across those rooms based on available capacity.
+- The final spread can be solved with OR-Tools by clicking Run OR-Tools Check.
+- OR-Tools may use up to 10% above each room capacity to try to fit all students.
+- OR-Tools minimizes unallocated students first, then avoids unnecessary unused room capacity where possible.
+- The report can be viewed as a normal table or as a Date / Period grid.
+- In grid view, rows are exam dates, columns are time periods, and each cell shows the room capability cards for that date and period.
+- Export Report includes a DatePeriodGrid sheet, and Export Grid downloads the grid plus a GridDetails sheet with full session details.
+- Total Capacity is not imported. It is derived as MinorSubjectCap + MajorCap.
+- If MajorCap is missing or 0, the full room allocation is checked against MinorSubjectCap only.
+- A single course cannot use MinorSubjectCap + MajorCap together. The largest/primary subject uses MinorSubjectCap, and other subjects use MajorCap.
+
+Super Invigilators
+- Used for doctor-only day-level supervision
+
+Control Sessions
+- Manage control sessions as real session records
+- Similar to Sessions tab
+- Includes:
+  - Excel template download
+  - Excel import
+  - Excel export
+  - remove all
+
+Workload
+- Shows how much work each staff member has
+- Helps evaluate balance and overload
+
+Day Coverage
+- Shows daily coverage and remaining gaps
+
+
+3. Recommended Workflow
+
+Step 1: Add sessions
+- Open Sessions tab
+- Enter session data manually or import the Sessions Excel file
+- If one session contains multiple course codes, write them in the CourseCodes field separated by semicolon
+- If multiple courses share the same room/date/time in the import file, they become one session
+- If one course is split across multiple rooms or periods, create one row per room/time using the same course code
+- Import staffing requirements separately with the Session Needs Excel file
+
+Step 2: Add staff
+- Open Invigilators tab
+- Add TAs and Doctors manually or import Excel
+
+Step 3: Add blocked times
+- Open Engagements tab
+- Add staff unavailable periods manually or import Excel
+
+Step 4: Add control sessions if needed
+- Open Control Sessions tab
+- Create control sessions or import them from Excel
+
+Step 5: Start assignment
+- Optional: open Room Capability and verify room/session capacity before scheduling
+- Open Scheduling tab
+- Click any session in the calendar
+- The floating assignment panel appears
+- Assign TAs and Doctors from the eligible list
+
+Step 6: Use auto scheduling if needed
+- In Scheduling tab, click Auto Schedule
+- The system attempts to place assignments automatically
+
+Step 7: Review workload
+- Open Workload tab
+- Check total load and balance between staff
+
+Step 8: Export results
+- Export by tab for local datasets
+- Export full workbook from Scheduling for a full round-trip file
+
+
+4. How Manual Scheduling Works
+
+In the Scheduling tab:
+- Sessions are shown on a time grid
+- Click once on a session to open its floating assignment panel
+- Click the same session again to close the panel
+- The panel shows:
+  - current TA assignments
+  - current Doctor assignments
+  - remaining TA need
+  - remaining Doctor need
+  - eligible TA count
+  - eligible Doctor count
+
+Only valid staff should appear in the assignment dropdowns based on backend rules.
+
+
+5. Assignment Rules
+
+The system checks these rules before allowing assignment:
+- Staff role must match the required role
+- Staff cannot be assigned to overlapping sessions
+- Staff cannot be assigned during engagement periods
+- Staff cannot exceed max hours
+- Duplicate assignment to the same session is blocked
+
+
+6. Excel Support
+
+The app supports two Excel usage styles:
+
+Per-tab import/export:
+- Sessions tab
+- Invigilators tab
+- Engagements tab
+- Control Sessions tab
+
+Full workbook import/export:
+- Scheduling tab
+
+Workbook sheets:
+- Sessions
+- SessionNeeds
+- Invigilators
+- Engagements
+- Assignments
+- Super
+- ControlSessions
+- ControlAssignments
+
+Templates are available so the expected columns are clear.
+For the Sessions sheet:
+- The main supported sample format is the same as sample/sessions.xlsx:
+  Room, CourseCode, Date, Start, End
+- Rows with the same Room, Date, Start, and End are imported as one session with merged course codes
+- CourseCodes, Courses, CourseNames, CourseName, and RoomPlacement are still supported for old files
+- Multiple course codes can be separated by semicolon or comma
+- Additional guide columns from sample/sessions_temp.xlsx are also supported:
+  RoomPlacement, CourseCode, Start, End, Day, OverRide, Date
+- The Sessions sheet is for session identity only: room, course code, date, time, and notes
+- Slash dates in the sample format are read as M/D/YYYY, so 6/1/2026 becomes 2026-06-01.
+
+For the SessionNeeds sheet:
+- Use SessionID when available for exact matching
+- CourseCode is not required in SessionNeeds
+- If SessionID is blank, the app matches by Room, Date, Start, and End
+- Supported need columns:
+  TANeeded, DoctorNeeded, InvigilatorsNeeded
+- Importing SessionNeeds updates TA and Doctor requirements without deleting assignments.
+
+
+7. Auto Scheduling
+
+Auto scheduling uses OR-Tools.
+The goal is to place staff while respecting:
+- role requirements
+- time conflicts
+- engagements
+- workload limits
+
+If auto scheduling is not sufficient for every case, manual editing can continue from the Scheduling tab.
+
+
+8. Practical Notes
+
+- Importing staff or sessions may clear related assignments, depending on the data flow
+- Full workbook import is the safest option when you want to restore a complete project state
+- Manual assignment is useful for exceptions after auto scheduling
+- Workload and Day Coverage should be reviewed before final export
+
+
+9. Using The App Over Network
+
+This app can be opened from another device on the same local network.
+
+Using it on localhost:
+- For development mode:
+  npm run dev
+- Then open:
+  http://localhost:5173
+
+- For backend-served local mode:
+  npm run localhost
+- Then open:
+  http://localhost:3001
+
+Localhost notes:
+- Port 5173 is the React frontend in development
+- Port 3001 is the Express server
+- In `npm run dev`, the frontend proxies API requests to the backend automatically
+- In `npm run localhost`, the frontend build is served directly by Express
+- If port 3001 or 5173 is busy, stop the other process using that port first
+
+Backend:
+- The server is already configured to listen on 0.0.0.0
+- This allows other devices on the same network to reach it
+
+How to run:
+- For network development mode:
+  npm run network
+- Then open from another device:
+  http://MACHINE_IP:5173
+
+- For network backend-served mode:
+  npm run localhost
+- Then open from another device:
+  http://MACHINE_IP:3001
+
+- Keep the host machine running while other devices use the app
+- Keep both running on the main machine
+
+How to find the machine IP:
+- On Windows, open terminal and run:
+  ipconfig
+- Find the local IPv4 address
+- Example:
+  192.168.1.20
+
+How to open the app from another device:
+- If using the Vite frontend during development, open:
+  http://MACHINE_IP:5173
+- If using the backend-served production build, open:
+  http://MACHINE_IP:3001
+
+Example:
+- http://192.168.1.20:5173
+- or
+- http://192.168.1.20:3001
+
+Important network notes:
+- Both devices must be on the same Wi-Fi or local network
+- Windows Firewall may block the port the first time
+- If blocked, allow Node.js or open the used port
+- Development mode usually uses the frontend port
+- Production-like local serving usually uses the backend port
+- The new `npm run network` command starts the frontend in network mode
+- The backend already listens on all interfaces, so `npm run localhost` can also be opened by IP on port 3001
+
+Recommended usage:
+- For normal office or campus internal testing, use the backend machine as the host
+- Open the app from staff laptops, tablets, or other PCs by IP address
+- Keep the host machine powered on while other devices are using the app
+
+
+10. Final Conclusion
+
+This application is now a usable exam invigilation management platform rather than just a simple scheduler.
+It supports the full operational flow:
+- define sessions
+- define staff
+- define unavailable periods
+- assign manually or automatically
+- review workload and gaps
+- export the final result
+
+The strongest operational path is:
+- build clean base data first
+- use templates for Excel imports
+- run auto scheduling
+- adjust manually in Scheduling
+- verify in Workload and Day Coverage
+- export the final workbook

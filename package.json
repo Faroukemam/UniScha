@@ -1,0 +1,23 @@
+{
+  "name": "uni-scha-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "network": "concurrently \"npm run server\" \"npm run client:network\"",
+    "server": "node server/index.js",
+    "client": "cd client && npm run dev",
+    "client:network": "cd client && npm run network",
+    "install-all": "npm install && cd client && npm install",
+    "build": "cd client && npm run build",
+    "start": "node server/index.js",
+    "localhost": "npm run build && node server/index.js"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "sql.js": "^1.14.1",
+    "xlsx": "^0.18.5"
+  }
+}
