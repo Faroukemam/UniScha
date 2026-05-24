@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { api, downloadFile } from '../api';
 import { useToast } from '../App';
 
 export default function SuperInvigilatorsPage() {
@@ -52,6 +52,16 @@ export default function SuperInvigilatorsPage() {
     }
   }
 
+  async function exportAssignments() {
+    try {
+      const file = await api.exportSuperInvigilators();
+      downloadFile(file.url, file.fileName || 'super_invigilator_assignments.xlsx');
+      showToast('Super invigilator assignments exported.', 'success');
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  }
+
   return (
     <section className="panel table-panel">
       <div className="panel-head">
@@ -60,6 +70,7 @@ export default function SuperInvigilatorsPage() {
           <p>Doctor-only assignments that automatically span the first session start to the last session end each day.</p>
         </div>
         <div className="action-row">
+          <button type="button" className="ghost-btn" onClick={exportAssignments}>Export Assignments</button>
           <button type="button" className="danger-btn" onClick={removeAll}>Remove All</button>
         </div>
       </div>

@@ -12,6 +12,12 @@ const emptyForm = {
   notes: ''
 };
 
+function getPrimaryImportRows(workbook, preferredSheet = 'Engagements') {
+  const sheet = workbook.Sheets[preferredSheet]
+    || workbook.Sheets[workbook.SheetNames.find((name) => String(name).trim().toLowerCase() !== 'instructions')];
+  return sheet ? XLSX.utils.sheet_to_json(sheet) : [];
+}
+
 export default function EngagementsPage() {
   const [engagements, setEngagements] = useState([]);
   const [invigilators, setInvigilators] = useState([]);
@@ -80,7 +86,7 @@ export default function EngagementsPage() {
     try {
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: 'array' });
-      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+      const rows = getPrimaryImportRows(workbook);
       await api.importEngagementRows(rows);
       showToast('Engagements imported from Excel.', 'success');
       await load();
@@ -107,6 +113,13 @@ export default function EngagementsPage() {
 
   function downloadTemplate() {
     const workbook = XLSX.utils.book_new();
+    const instructions = [
+      { Section: 'Purpose', Instruction: 'Use this template to import engagement rows that block staff during specific time periods.' },
+      { Section: 'Scope', Instruction: 'Engagements affect availability only. They do not assign staff to sessions.' },
+      { Section: 'Columns', Instruction: 'Recommended columns: StaffID, Date, Start, End, Engagement, Notes.' },
+      { Section: 'Engagement', Instruction: 'Use 1 for blocked and 0 for not blocked.' },
+      { Section: 'DateTime', Instruction: 'Preferred formats: Date = YYYY-MM-DD, Start/End = HH:MM.' },
+    ];
     const rows = [
       {
         StaffID: '1001',
@@ -118,6 +131,7 @@ export default function EngagementsPage() {
       }
     ];
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Engagements');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(instructions), 'Instructions');
     XLSX.writeFile(workbook, 'engagements_template.xlsx');
     showToast('Engagements template downloaded.', 'success');
   }

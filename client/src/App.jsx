@@ -2,7 +2,9 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import SessionsPage from './pages/SessionsPage.jsx';
 import InvigilatorsPage from './pages/InvigilatorsPage.jsx';
+import StaffHourPolicyPage from './pages/StaffHourPolicyPage.jsx';
 import SchedulingPage from './pages/SchedulingPage.jsx';
+import OnCallPage from './pages/OnCallPage.jsx';
 import SuperInvigilatorsPage from './pages/SuperInvigilatorsPage.jsx';
 import ControlSessionsPage from './pages/ControlSessionsPage.jsx';
 import WorkloadPage from './pages/WorkloadPage.jsx';
@@ -11,6 +13,7 @@ import DayCoveragePage from './pages/DayCoveragePage.jsx';
 import EngagementsPage from './pages/EngagementsPage.jsx';
 import ReportsPage from './pages/ReportsPage.jsx';
 import RoomCapabilityPage from './pages/RoomCapabilityPage.jsx';
+import CourseRoomAssignmentPage from './pages/CourseRoomAssignmentPage.jsx';
 
 const ToastContext = createContext(() => {});
 
@@ -22,9 +25,12 @@ const navItems = [
   { to: '/', label: 'Dashboard', icon: 'dashboard' },
   { to: '/sessions', label: 'Sessions', icon: 'sessions' },
   { to: '/invigilators', label: 'Invigilators', icon: 'staff' },
+  { to: '/staff-hour-policy', label: 'Staff Hour Policy', icon: 'policy' },
   { to: '/engagements', label: 'Engagements', icon: 'engagements' },
   { to: '/scheduling', label: 'Scheduling', icon: 'schedule' },
+  { to: '/on-call', label: 'On-Call', icon: 'phone' },
   { to: '/room-capability', label: 'Room Capability', icon: 'capacity' },
+  { to: '/course-room-assignment', label: 'Course Room Assignment', icon: 'rooms' },
   { to: '/day-coverage', label: 'Day Coverage', icon: 'coverage' },
   { to: '/super-invigilators', label: 'Super Invigilators', icon: 'super' },
   { to: '/control-sessions', label: 'CONTROL Session', icon: 'control' },
@@ -36,9 +42,12 @@ const pageTitles = {
   '/': 'Dashboard',
   '/sessions': 'Sessions',
   '/invigilators': 'Invigilators',
+  '/staff-hour-policy': 'Staff Hour Policy',
   '/engagements': 'Engagements',
   '/scheduling': 'Scheduling',
+  '/on-call': 'On-Call',
   '/room-capability': 'Room Capability',
+  '/course-room-assignment': 'Course Room Assignment',
   '/day-coverage': 'Day Coverage',
   '/super-invigilators': 'Super Invigilators',
   '/control-sessions': 'CONTROL Session',
@@ -50,9 +59,12 @@ const pageDescriptions = {
   '/': 'Live overview of staffing coverage, workloads, and exam activity.',
   '/sessions': 'Define rooms, dates, periods, and role-based staffing needs.',
   '/invigilators': 'Manage TA and Doctor pools with workload limits.',
+  '/staff-hour-policy': 'Control total workload targets, limits, and exclusions for each staff member.',
   '/engagements': 'Block unavailable periods before assignment and optimization.',
   '/scheduling': 'Review the assignment grid and run auto-scheduling.',
+  '/on-call': 'Manage reserve TA and Doctor coverage by active exam window.',
   '/room-capability': 'Check room capacity, course loads, and session conflicts before assignment.',
+  '/course-room-assignment': 'Assign scheduled courses into compatible rooms using OR-Tools.',
   '/day-coverage': 'Inspect daily gaps and pressure points before publishing.',
   '/super-invigilators': 'Manage doctor-only full-day supervision windows.',
   '/control-sessions': 'Assign full-day control coverage for each exam day.',
@@ -65,9 +77,12 @@ function NavIcon({ type }) {
     dashboard: <path d="M4 4h7v7H4zm9 0h7v4h-7zM4 13h4v7H4zm6 3h10v4H10z" />,
     sessions: <path d="M7 3v3M17 3v3M4 8h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m2 6h4m2 0h4m-10 4h4m2 0h4" />,
     staff: <path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Zm-7 8a7 7 0 0 1 14 0M19 11a3 3 0 1 0-2.6-4.5M19 20a5 5 0 0 0-3-4.58" />,
+    policy: <path d="M5 4h14v4H5zm0 6h10v4H5zm0 6h14v4H5m12-10 2 2m0-2-2 2" />,
     engagements: <path d="M12 7v5l3 3M4 12a8 8 0 1 0 8-8 8 8 0 0 0-8 8m14-8 2 2m-2 16 2-2" />,
     schedule: <path d="M3 5h18v14H3zM3 10h18M8 5v14M14 5v14" />,
+    phone: <path d="M7 4h10v16H7zM9 2h6M10 18h4M12 7v5m0 3h.01" />,
     capacity: <path d="M4 20V8l8-4 8 4v12M8 20v-7h8v7M9 9h.01M15 9h.01M12 9h.01M7 20h10" />,
+    rooms: <path d="M4 20V6l6-3 10 5v12M8 20v-8h4v8M14 20v-5h3v5M8 8h.01M12 7h.01M16 10h.01M16 13h.01" />,
     coverage: <path d="M4 18h16M6 18V9m6 9V5m6 13v-7" />,
     super: <path d="M12 3l2.7 5.46L21 9.27l-4.5 4.39 1.06 6.22L12 17l-5.56 2.88 1.06-6.22L3 9.27l6.3-.81z" />,
     control: <path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zm-3 9 2 2 4-4" />,
@@ -201,9 +216,12 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/sessions" element={<SessionsPage />} />
             <Route path="/invigilators" element={<InvigilatorsPage />} />
+            <Route path="/staff-hour-policy" element={<StaffHourPolicyPage />} />
             <Route path="/engagements" element={<EngagementsPage />} />
             <Route path="/scheduling" element={<SchedulingPage />} />
+            <Route path="/on-call" element={<OnCallPage />} />
             <Route path="/room-capability" element={<RoomCapabilityPage />} />
+            <Route path="/course-room-assignment" element={<CourseRoomAssignmentPage />} />
             <Route path="/day-coverage" element={<DayCoveragePage />} />
             <Route path="/super-invigilators" element={<SuperInvigilatorsPage />} />
             <Route path="/control-sessions" element={<ControlSessionsPage />} />

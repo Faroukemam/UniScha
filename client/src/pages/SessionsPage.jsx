@@ -22,15 +22,31 @@ function getSessionCourses(session) {
   return session.courseName || '';
 }
 
+function getPrimaryImportRows(workbook, preferredSheets = []) {
+  const preferred = preferredSheets.find((name) => workbook.Sheets[name]);
+  if (preferred) {
+    return XLSX.utils.sheet_to_json(workbook.Sheets[preferred]);
+  }
+  const firstDataSheet = workbook.SheetNames.find((name) => String(name).trim().toLowerCase() !== 'instructions');
+  if (!firstDataSheet) return [];
+  return XLSX.utils.sheet_to_json(workbook.Sheets[firstDataSheet]);
+}
+
 export default function SessionsPage() {
   const [sessions, setSessions] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState('');
   const showToast = useToast();
 
   async function load() {
-    const response = await api.getSessions();
-    setSessions(response);
+    setLoading(true);
+    try {
+      const response = await api.getSessions();
+      setSessions(response);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -89,17 +105,17 @@ export default function SessionsPage() {
     }
   }
 
-  async function readExcelRows(file) {
+  async function readExcelRows(file, preferredSheets = []) {
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: 'array' });
-    return XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+    return getPrimaryImportRows(workbook, preferredSheets);
   }
 
   async function importSessionsExcel(event) {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const rows = await readExcelRows(file);
+      const rows = await readExcelRows(file, ['Sessions']);
       await api.importSessionsRows(rows);
       showToast('Session records imported from Excel.', 'success');
       await load();
@@ -113,7 +129,7 @@ export default function SessionsPage() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const rows = await readExcelRows(file);
+      const rows = await readExcelRows(file, ['SessionNeeds']);
       const result = await api.importSessionNeedsRows(rows);
       const missed = result.unmatched?.length ? ` ${result.unmatched.length} unmatched rows.` : '';
       showToast(`Session needs updated: ${result.updated || 0}.${missed}`, result.unmatched?.length ? 'warning' : 'success');
@@ -127,7 +143,7 @@ export default function SessionsPage() {
   function exportSessionsExcel() {
     const rows = sessions.map((session) => ({
       Room: session.room || '',
-      CourseCode: getSessionCourses(session).split(';')[0]?.trim() || '',
+      CourseCode: getSessionCourses(session) || '',
       Date: session.date || '',
       Start: session.startTime || '',
       End: session.endTime || ''
@@ -157,6 +173,13 @@ export default function SessionsPage() {
 
   function downloadSessionsTemplate() {
     const workbook = XLSX.utils.book_new();
+    const instructions = [
+      { Section: 'Purpose', Instruction: 'Use this template to import session master rows only.' },
+      { Section: 'Scope', Instruction: 'This import creates or updates Scheduling sessions. It does not assign invigilators.' },
+      { Section: 'Columns', Instruction: 'Required columns: Room, CourseCode, Date, Start, End.' },
+      { Section: 'CourseCode', Instruction: 'Use one course code per row or a semicolon-separated list when a room block contains multiple courses.' },
+      { Section: 'DateTime', Instruction: 'Preferred formats: Date = YYYY-MM-DD, Start/End = HH:MM.' },
+    ];
     const rows = [
       {
         Room: '324 R PH',
@@ -175,12 +198,19 @@ export default function SessionsPage() {
       }
     ];
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Sessions');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(instructions), 'Instructions');
     XLSX.writeFile(workbook, 'sessions_template.xlsx');
     showToast('Sessions template downloaded.', 'success');
   }
 
   function downloadNeedsTemplate() {
     const workbook = XLSX.utils.book_new();
+    const instructions = [
+      { Section: 'Purpose', Instruction: 'Use this template to update TA/Doctor staffing needs for existing or matched sessions.' },
+      { Section: 'Matching', Instruction: 'SessionID is preferred. If omitted, matching falls back to Room + Date + Start (+ End/CourseCode when needed).' },
+      { Section: 'Columns', Instruction: 'Recommended columns: SessionID, Room, Date, Start, End, TANeeded, DoctorNeeded, InvigilatorsNeeded.' },
+      { Section: 'DateTime', Instruction: 'Preferred formats: Date = YYYY-MM-DD, Start/End = HH:MM.' },
+    ];
     const rows = [
       {
         SessionID: 'optional-existing-session-id',
@@ -204,6 +234,7 @@ export default function SessionsPage() {
       }
     ];
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'SessionNeeds');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(instructions), 'Instructions');
     XLSX.writeFile(workbook, 'session_needs_template.xlsx');
     showToast('Session needs template downloaded.', 'success');
   }
@@ -278,7 +309,7 @@ export default function SessionsPage() {
         <div className="panel-head">
           <h2>All Sessions</h2>
           <div className="action-row">
-            <p>{sessions.length} records</p>
+            <p>{loading ? 'Loading...' : `${sessions.length} records`}</p>
             <button type="button" className="ghost-btn" onClick={downloadSessionsTemplate}>Sessions Template</button>
             <label className="ghost-btn">
               Import Sessions
@@ -322,7 +353,12 @@ export default function SessionsPage() {
                   </td>
                 </tr>
               ))}
-              {!sessions.length ? (
+              {loading && !sessions.length ? (
+                <tr>
+                  <td colSpan="7" className="empty-cell">Loading sessions...</td>
+                </tr>
+              ) : null}
+              {!loading && !sessions.length ? (
                 <tr>
                   <td colSpan="7" className="empty-cell">No sessions yet.</td>
                 </tr>

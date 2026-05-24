@@ -72,7 +72,8 @@ function courseKey(value) {
 async function readRows(file) {
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: 'array' });
-  return XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+  const firstDataSheet = workbook.SheetNames.find((name) => String(name).trim().toLowerCase() !== 'instructions');
+  return firstDataSheet ? XLSX.utils.sheet_to_json(workbook.Sheets[firstDataSheet]) : [];
 }
 
 function parseSessions(rows) {
@@ -478,17 +479,27 @@ export default function RoomCapabilityPage() {
         sheets: [{ name: 'Sessions', rows: [
           { Room: '324 R PH', CourseCode: 'BME407', Date: '6/1/2026', Start: '09:30', End: '11:30' },
           { Room: '325 R PH', CourseCode: 'BME407', Date: '6/1/2026', Start: '09:30', End: '11:30' }
+        ] }, { name: 'Instructions', rows: [
+          { Section: 'Purpose', Instruction: 'Import room-session blocks for Room Capability analysis.' },
+          { Section: 'Columns', Instruction: 'Required columns: Room, CourseCode, Date, Start, End.' },
+          { Section: 'DateTime', Instruction: 'Preferred formats: Date = YYYY-MM-DD, Start/End = HH:MM.' },
         ] }]
       },
       courses: {
         name: 'course_schedule_template.xlsx',
-        sheets: [{ name: 'CourseSchedule', rows: [{ CourseCode: 'BME407', Students: 160, Date: '6/1/2026', Start: '09:30', End: '11:30', Department: 'Biomedical Engineering' }] }]
+        sheets: [{ name: 'CourseSchedule', rows: [{ CourseCode: 'BME407', Students: 160, Date: '6/1/2026', Start: '09:30', End: '11:30', Department: 'Biomedical Engineering' }] }, { name: 'Instructions', rows: [
+          { Section: 'Purpose', Instruction: 'Import course enrollment demand rows for Room Capability analysis.' },
+          { Section: 'Columns', Instruction: 'Required columns: CourseCode, Students, Date, Start, End. Department is optional.' },
+        ] }]
       },
       capacities: {
         name: 'room_capacity_template.xlsx',
         sheets: [{ name: 'RoomCapacity', rows: [
           { Room: '324 R PH', MinorSubjectCap: 70, MajorCap: 30 },
           { Room: '325 R PH', MinorSubjectCap: 80, MajorCap: 0 }
+        ] }, { name: 'Instructions', rows: [
+          { Section: 'Purpose', Instruction: 'Import room capacity and subject-split limits for Room Capability analysis.' },
+          { Section: 'Columns', Instruction: 'Required columns: Room, MinorSubjectCap, MajorCap.' },
         ] }]
       }
     };
