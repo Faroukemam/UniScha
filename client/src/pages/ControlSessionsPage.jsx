@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { api } from '../api';
+import { api, downloadFile } from '../api';
 import { useToast } from '../App';
 
 const emptyForm = {
@@ -13,6 +13,12 @@ const emptyForm = {
   doctorNeeded: 0,
   notes: ''
 };
+
+function getPrimaryImportRows(workbook, preferredSheet = 'ControlSessions') {
+  const sheet = workbook.Sheets[preferredSheet]
+    || workbook.Sheets[workbook.SheetNames.find((name) => String(name).trim().toLowerCase() !== 'instructions')];
+  return sheet ? XLSX.utils.sheet_to_json(sheet) : [];
+}
 
 export default function ControlSessionsPage() {
   const [data, setData] = useState({ sessions: [], invigilators: [], assignments: [] });
@@ -125,9 +131,17 @@ export default function ControlSessionsPage() {
     try {
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: 'array' });
-      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-      await api.importControlSessionsRows(rows);
-      showToast('Control sessions imported from Excel.', 'success');
+      const sessionSheet = workbook.Sheets.ControlSessions || null;
+      const sessionRows = sessionSheet ? XLSX.utils.sheet_to_json(sessionSheet) : [];
+      const assignmentSheet = workbook.Sheets.ControlAssignments || workbook.Sheets.ControlLoads || null;
+      const assignmentRows = assignmentSheet ? XLSX.utils.sheet_to_json(assignmentSheet) : [];
+      if (sessionRows.length) {
+        await api.importControlSessionsRows(sessionRows);
+      }
+      if (assignmentRows.length) {
+        await api.importControlSessionLoadRows(assignmentRows);
+      }
+      showToast('Control sessions workbook imported.', 'success');
       await load();
     } catch (error) {
       showToast(error.message, 'error');
@@ -135,42 +149,24 @@ export default function ControlSessionsPage() {
     event.target.value = '';
   }
 
-  function exportExcel() {
-    const rows = data.sessions.map((session) => ({
-      CourseName: session.courseName || '',
-      Room: session.room || '',
-      Date: session.date || '',
-      Start: session.startTime || '',
-      End: session.endTime || '',
-      TANeeded: session.taNeeded || 0,
-      DoctorNeeded: session.doctorNeeded || 0,
-      InvigilatorsNeeded: session.totalNeeded || ((session.taNeeded || 0) + (session.doctorNeeded || 0)),
-      Notes: session.notes || ''
-    }));
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'ControlSessions');
-    XLSX.writeFile(workbook, 'control_sessions_export.xlsx');
-    showToast('Control sessions exported to Excel.', 'success');
+  async function exportExcel() {
+    try {
+      const file = await api.exportControlSessions();
+      downloadFile(file.url, file.fileName || 'control_session_assignments.xlsx');
+      showToast('Control sessions and assignments exported.', 'success');
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
   }
 
-  function downloadTemplate() {
-    const workbook = XLSX.utils.book_new();
-    const rows = [
-      {
-        CourseName: 'Control Session',
-        Room: 'Control',
-        Date: '2026-06-15',
-        Start: '09:00',
-        End: '17:00',
-        TANeeded: 2,
-        DoctorNeeded: 1,
-        InvigilatorsNeeded: 3,
-        Notes: 'Example control session row'
-      }
-    ];
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'ControlSessions');
-    XLSX.writeFile(workbook, 'control_sessions_template.xlsx');
-    showToast('Control sessions template downloaded.', 'success');
+  async function downloadTemplate() {
+    try {
+      const file = await api.exportControlSessionTemplate();
+      downloadFile(file.url, file.fileName || 'control_session_template.xlsx');
+      showToast('Control sessions template downloaded.', 'success');
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
   }
 
   const taInvigilators = data.invigilators.filter((item) => item.role === 'TA');

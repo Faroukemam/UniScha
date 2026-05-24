@@ -124,6 +124,23 @@ Room Capability
 - If MajorCap is missing or 0, the full room allocation is checked against MinorSubjectCap only.
 - A single course cannot use MinorSubjectCap + MajorCap together. The largest/primary subject uses MinorSubjectCap, and other subjects use MajorCap.
 
+Course Rooms
+- Assigns scheduled courses into room sessions using OR-Tools
+- Import:
+  - Sessions: Room, Date, Start, End
+  - Course Schedule: CourseCode, Students, Date, Start, End, RoomPlacementType, LinkedGroup, LinkedCourses
+  - Room Capacity: Room, MinorCap, MajorCap, RoomType
+- Room types are TH, DH, and LAB
+- TH courses prefer TH rooms first, but can use DH or LAB rooms if needed
+- DH and LAB courses cannot be assigned to TH rooms
+- Linked courses must be assigned to the same room/date/time placement
+- Courses prefer one room first, but large courses may split across compatible rooms when needed
+- One room session can contain more than two courses, including three or more courses, when the combined students fit the room capacity
+- The solver tries to use exact room capacity first and treats the 10% overflow as emergency capacity
+- The primary subject in a room uses MinorCap
+- Other subjects use MajorCap first, then MinorCap fallback if MajorCap is missing or not enough
+- Includes templates, upload markers, table report, date / period grid, issue list, and Excel export
+
 Super Invigilators
 - Used for doctor-only day-level supervision
 

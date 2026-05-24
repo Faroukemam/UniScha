@@ -1,0 +1,191 @@
+UNI Scheduler Project Proposal
+
+Project Name
+UNI Scheduler and Exam Operations Platform
+
+Purpose
+This project is a web-based platform for managing university exam operations.
+It combines scheduling, invigilation assignment, room usage analysis, control sessions,
+super invigilator planning, workload monitoring, and course-room optimization.
+
+Core Objective
+The system is intended to replace fragmented spreadsheet-based workflows with one
+centralized application that can:
+
+- import structured Excel data
+- normalize and validate operational records
+- assign invigilation duties
+- analyze fairness and workload
+- optimize course-to-room placement
+- export operational reports back to Excel
+
+Primary Modules
+
+1. Dashboard
+- high-level counts and operational summary
+- open staffing need indicators
+- quick navigation to major workflows
+
+2. Sessions
+- exam session records
+- session need import
+- room/time/course normalization
+
+3. Invigilators
+- TA and Doctor staff records
+- role, load type, max-hours, department data
+
+4. Engagements
+- blocked staff time
+- external commitments that prevent assignment
+
+5. Scheduling
+- manual invigilation assignment
+- auto scheduling through optimization
+- locked assignment preservation
+- overlap and availability checking
+
+6. Super Invigilators
+- day-level doctor assignment handling
+
+7. Control Sessions
+- separate control-room staffing workflow
+
+8. Workload
+- duty counts, minutes, and total load tracking
+
+9. Day Coverage
+- daily shortage and duty coverage view
+
+10. Reports
+- fairness, utilization, conflict, session coverage, and quality reporting
+
+11. Room Capability
+- room capacity analysis against session/course demand
+
+12. Course Room Assignment
+- exam course placement into rooms
+- room type rules
+- major/minor capacity logic
+- backup room handling
+- export of detailed placement workbooks
+
+Technical Stack
+
+Frontend
+- React
+- Vite
+- XLSX for client-side Excel handling where needed
+
+Backend
+- Node.js
+- Express
+
+Database and Persistence
+- SQLite as the primary persistent data source
+- store.json and store.last-good.json as backup/export mirror files
+- startup logic now selects the richer valid source and keeps SQLite and JSON aligned
+
+Optimization Layer
+- Python
+- Google OR-Tools CP-SAT
+
+Current Solver Areas
+
+1. Scheduling Solver
+- assigns TA and Doctor duties to sessions
+- respects role need, overlap, engagements, super/control blocking, and locked assignments
+- uses CP-SAT first
+- uses greedy fallback when fallback gives better coverage
+
+2. Course Room Assignment Solver
+- places courses into rooms using room availability and capacity rules
+- handles linked groups
+- supports major/minor block usage
+- supports backup AutoAvailable rooms
+
+Data Flow
+
+1. Excel imports are uploaded from tab-specific screens.
+2. Backend normalizes imported rows.
+3. Normalized state is written through the central store layer.
+4. The store layer mirrors state to JSON backups and synchronizes SQLite.
+5. Tabs read normalized state from the backend.
+6. Reports and exports are generated from current persisted state.
+
+Key Functional Requirements
+
+- all imports must normalize date/time/room/course/staff fields consistently
+- no overlapping duty assignments for the same staff member
+- no invalid room-time conflicts in room assignment flows
+- fairness and coverage must be measurable and reportable
+- exports must be readable, structured, and re-import friendly
+
+Current Architecture Direction
+
+The project is moving toward:
+
+- SQLite as the main operational source
+- centralized normalization in the backend
+- safer restart recovery
+- optimization-backed scheduling and room allocation
+- clearer workflow-specific exports
+
+Current Strengths
+
+- broad exam operations coverage in one app
+- practical Excel import/export workflow
+- strong backend normalization for multiple tabs
+- optimization support for both staffing and room placement
+- backup recovery behavior for restart scenarios
+
+Current Risks / Limitations
+
+- some modules still rely on shared store behavior rather than dedicated service layers
+- JSON mirror files are still present and can become stale if not kept aligned
+- frontend bundle is large and can be split later
+- optimization quality still depends on data quality and realistic staffing/capacity inputs
+
+Recommended Next Priorities
+
+1. Add a system storage status endpoint
+- show current SQLite counts
+- show JSON mirror counts
+- show startup source used
+- help debug persistence mismatches quickly
+
+2. Add import validation summaries across all tabs
+- rows imported
+- rows rejected
+- rows unmatched
+- field-level errors
+
+3. Add explicit operational audit logging
+- who imported what
+- when assignments changed
+- when solver runs replaced data
+
+4. Improve solver diagnostics
+- why a session stayed uncovered
+- why a course-room placement used backup
+- why a shortage remained
+
+5. Modularize service logic further
+- scheduling service
+- import normalization service
+- export formatting service
+- course-room service
+
+Expected Value
+
+This project provides a practical internal system for universities to manage exam operations
+with better consistency, reduced manual effort, and clearer decision support than spreadsheet-only workflows.
+
+Document Purpose
+This file is a technical and operational proposal summary for the current project state.
+It can be used as a baseline for:
+
+- stakeholder explanation
+- developer onboarding
+- architecture review
+- future enhancement planning

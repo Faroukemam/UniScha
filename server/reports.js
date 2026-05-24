@@ -1,6 +1,9 @@
 const {
   buildDutyCollections,
+  buildOnCallNeeds,
+  buildStaffHourPolicySummary,
   buildSchedulingView,
+  buildWorkloadView,
   parseTimeToMinutes,
   rangesOverlap,
 } = require('./store');
@@ -53,10 +56,11 @@ function personMatches(person, filters) {
 function buildReportContext(store, rawFilters) {
   const filters = getFilters(rawFilters);
   const scheduling = buildSchedulingView(store);
-  const { sessionDuties, superDuties, controlDuties } = buildDutyCollections(store);
-  const allDuties = [...sessionDuties, ...superDuties, ...controlDuties];
+  const { sessionDuties, superDuties, controlDuties, onCallDuties } = buildDutyCollections(store);
+  const allDuties = [...sessionDuties, ...superDuties, ...controlDuties, ...onCallDuties];
   const people = store.invigilators.filter((person) => personMatches(person, filters));
   const personMap = new Map(store.invigilators.map((person) => [person.id, person]));
+  const filteredOnCallNeeds = buildOnCallNeeds(store).filter((need) => dateMatches(need.date, filters));
 
   const filteredDuties = allDuties.filter((duty) => {
     const person = personMap.get(duty.invigilatorId);
@@ -75,18 +79,22 @@ function buildReportContext(store, rawFilters) {
     filteredSessions,
     filteredDuties,
     filteredEngagements,
+    filteredOnCallNeeds,
     allDuties,
   };
 }
 
 function buildWorkloadReport(store, rawFilters) {
   const context = buildReportContext(store, rawFilters);
+  const policySummary = buildStaffHourPolicySummary(store);
+  const workloadById = new Map(buildWorkloadView(store).map((row) => [row.id, row]));
   const rows = context.people.map((person) => {
-    const duties = context.filteredDuties.filter((duty) => duty.invigilatorId === person.id);
-    const assignedMinutes = duties.reduce((sum, duty) => sum + Number(duty.durationMinutes || 0), 0);
+    const base = workloadById.get(person.id);
+    const assignedMinutes = Number(base?.totalMinutes || 0);
     const maxMinutes = Number(person.maxHours || 0) * 60;
     const remainingMinutes = Math.max(0, maxMinutes - assignedMinutes);
     const utilizationPercent = maxMinutes > 0 ? Math.round((assignedMinutes / maxMinutes) * 100) : 0;
+    const effective = policySummary.effectivePolicyByInvigilatorId.get(person.id);
     return {
       id: person.id,
       staffId: person.staffId || '',
@@ -96,9 +104,23 @@ function buildWorkloadReport(store, rawFilters) {
       maxHours: Number(person.maxHours || 0),
       assignedHours: roundHours(assignedMinutes),
       remainingHours: roundHours(remainingMinutes),
-      assignedSessions: duties.length,
+      assignedSessions: Number(base?.sessionCount || 0) + Number(base?.superCount || 0) + Number(base?.controlCount || 0) + Number(base?.onCallCount || 0),
+      sessionHours: roundHours(base?.sessionMinutes || 0),
+      superHours: roundHours(base?.superMinutes || 0),
+      controlHours: roundHours(base?.controlMinutes || 0),
+      onCallHours: roundHours(base?.onCallMinutes || 0),
+      sessionCount: Number(base?.sessionCount || 0),
+      superCount: Number(base?.superCount || 0),
+      controlCount: Number(base?.controlCount || 0),
+      onCallCount: Number(base?.onCallCount || 0),
       utilizationPercent,
       assignedMinutes,
+      roleAverageHours: Number(effective?.rawAverageHours || 0),
+      effectiveAllowedHours: Number(effective?.allowedHours || 0),
+      differenceFromTargetHours: Number(base?.differenceFromTargetHours || 0),
+      policyMode: effective?.mode || 'default',
+      policyStatus: base?.policyStatus || 'default',
+      excludeFromAutoSchedule: Boolean(base?.excludeFromAutoSchedule),
       status: assignedMinutes > maxMinutes && maxMinutes > 0
         ? 'Overloaded'
         : assignedMinutes === 0
@@ -115,10 +137,23 @@ function buildWorkloadReport(store, rawFilters) {
     totalStaff: rows.length,
     totalAssignedHours: roundHours(totalAssignedMinutes),
     averageAssignedHours: rows.length ? roundHours(totalAssignedMinutes / rows.length) : 0,
+    taAverageHours: policySummary.rawAverageHoursByRole.TA || 0,
+    doctorAverageHours: policySummary.rawAverageHoursByRole.Doctor || 0,
     maxAssignedHours: rows.length ? roundHours(Math.max(...assignedMinutesList)) : 0,
     minAssignedHours: rows.length ? roundHours(Math.min(...assignedMinutesList)) : 0,
+    sessionAssignments: rows.reduce((sum, row) => sum + Number(row.sessionCount || 0), 0),
+    superAssignments: rows.reduce((sum, row) => sum + Number(row.superCount || 0), 0),
+    controlAssignments: rows.reduce((sum, row) => sum + Number(row.controlCount || 0), 0),
+    sessionHours: Math.round(rows.reduce((sum, row) => sum + Number(row.sessionHours || 0), 0) * 100) / 100,
+    superHours: Math.round(rows.reduce((sum, row) => sum + Number(row.superHours || 0), 0) * 100) / 100,
+    controlHours: Math.round(rows.reduce((sum, row) => sum + Number(row.controlHours || 0), 0) * 100) / 100,
+    onCallAssignments: rows.reduce((sum, row) => sum + Number(row.onCallCount || 0), 0),
+    onCallHours: Math.round(rows.reduce((sum, row) => sum + Number(row.onCallHours || 0), 0) * 100) / 100,
     overloadedCount: rows.filter((row) => row.status === 'Overloaded').length,
     underutilizedCount: rows.filter((row) => row.status === 'Underutilized').length,
+    overPolicyCount: rows.filter((row) => row.policyStatus === 'over target').length,
+    underTargetCount: rows.filter((row) => row.policyStatus === 'under target').length,
+    excludedStaffCount: rows.filter((row) => row.excludeFromAutoSchedule).length,
   };
 
   return { filters: context.filters, summary, rows };
@@ -178,6 +213,10 @@ function buildDailyCoverageReport(store, rawFilters) {
         doctorRequired: 0,
         taAssigned: 0,
         doctorAssigned: 0,
+        onCallTANeeded: 0,
+        onCallDoctorNeeded: 0,
+        onCallTAAssigned: 0,
+        onCallDoctorAssigned: 0,
       });
     }
     const row = rowsByDate.get(session.date);
@@ -188,6 +227,51 @@ function buildDailyCoverageReport(store, rawFilters) {
     row.doctorAssigned += session.doctorAssignments.length;
   }
 
+  for (const need of context.filteredOnCallNeeds) {
+    if (!rowsByDate.has(need.date)) {
+      rowsByDate.set(need.date, {
+        date: need.date,
+        totalSessions: 0,
+        taRequired: 0,
+        doctorRequired: 0,
+        taAssigned: 0,
+        doctorAssigned: 0,
+        onCallTANeeded: 0,
+        onCallDoctorNeeded: 0,
+        onCallTAAssigned: 0,
+        onCallDoctorAssigned: 0,
+      });
+    }
+    const row = rowsByDate.get(need.date);
+    row.onCallTANeeded += Number(need.onCallTANeeded || 0);
+    row.onCallDoctorNeeded += Number(need.onCallDoctorNeeded || 0);
+  }
+
+  context.filteredDuties
+    .filter((duty) => duty.dutyType === 'OnCall')
+    .forEach((duty) => {
+      if (!rowsByDate.has(duty.date)) {
+        rowsByDate.set(duty.date, {
+          date: duty.date,
+          totalSessions: 0,
+          taRequired: 0,
+          doctorRequired: 0,
+          taAssigned: 0,
+          doctorAssigned: 0,
+          onCallTANeeded: 0,
+          onCallDoctorNeeded: 0,
+          onCallTAAssigned: 0,
+          onCallDoctorAssigned: 0,
+        });
+      }
+      const row = rowsByDate.get(duty.date);
+      if ((duty.role || duty.invigilator?.role) === 'Doctor') {
+        row.onCallDoctorAssigned += 1;
+      } else {
+        row.onCallTAAssigned += 1;
+      }
+    });
+
   const rows = Array.from(rowsByDate.values())
     .map((row) => {
       const totalRequired = row.taRequired + row.doctorRequired;
@@ -196,6 +280,8 @@ function buildDailyCoverageReport(store, rawFilters) {
         ...row,
         taGaps: Math.max(0, row.taRequired - row.taAssigned),
         doctorGaps: Math.max(0, row.doctorRequired - row.doctorAssigned),
+        onCallTAGaps: Math.max(0, Number(row.onCallTANeeded || 0) - Number(row.onCallTAAssigned || 0)),
+        onCallDoctorGaps: Math.max(0, Number(row.onCallDoctorNeeded || 0) - Number(row.onCallDoctorAssigned || 0)),
         coveragePercent: toPercent(totalAssigned, totalRequired),
         status: totalAssigned >= totalRequired ? 'Covered' : 'Shortage',
       };
@@ -367,6 +453,55 @@ function buildStaffReport(store, rawFilters, staffRef) {
   };
 }
 
+function buildDetailedLoadReport(store, rawFilters) {
+  const context = buildReportContext(store, rawFilters);
+  const sessionById = new Map((store.sessions || []).map((item) => [item.id, item]));
+  const controlSessionById = new Map((store.controlSessions || []).map((item) => [item.id, item]));
+
+  const rows = context.filteredDuties
+    .map((duty) => {
+      const person = context.personMap.get(duty.invigilatorId) || duty.invigilator || {};
+      const session = duty.dutyType === 'Session' ? sessionById.get(duty.sessionId) : null;
+      const controlSession = duty.dutyType === 'Control' ? controlSessionById.get(duty.controlSessionId) : null;
+      return {
+        DutyType: duty.dutyType || '',
+        StaffID: person?.staffId || '',
+        StaffName: person?.name || '',
+        Role: person?.role || duty.role || '',
+        Date: duty.date || '',
+        Start: duty.startTime || '',
+        End: duty.endTime || '',
+        DurationHours: roundHours(duty.durationMinutes || 0),
+        CourseCode: session
+          ? (Array.isArray(session.courseNames) && session.courseNames.length ? session.courseNames.join('; ') : session.courseName || '')
+          : (controlSession
+            ? (Array.isArray(controlSession.courseNames) && controlSession.courseNames.length ? controlSession.courseNames.join('; ') : controlSession.courseName || '')
+            : ''),
+        Room: session?.room || controlSession?.room || '',
+        SessionID: duty.sessionId || '',
+        ControlSessionID: duty.controlSessionId || '',
+        Label: duty.label || '',
+      };
+    })
+    .sort((a, b) =>
+      a.Date.localeCompare(b.Date)
+      || a.Start.localeCompare(b.Start)
+      || a.DutyType.localeCompare(b.DutyType)
+      || a.StaffName.localeCompare(b.StaffName)
+    );
+
+  const summary = {
+    totalDuties: rows.length,
+    sessionDuties: rows.filter((row) => row.DutyType === 'Session').length,
+    superDuties: rows.filter((row) => row.DutyType === 'Super').length,
+    controlDuties: rows.filter((row) => row.DutyType === 'Control').length,
+    onCallDuties: rows.filter((row) => row.DutyType === 'OnCall').length,
+    totalHours: Math.round(rows.reduce((sum, row) => sum + Number(row.DurationHours || 0), 0) * 100) / 100,
+  };
+
+  return { filters: context.filters, summary, rows };
+}
+
 function buildSessionCoverageReport(store, rawFilters) {
   const context = buildReportContext(store, rawFilters);
   const rows = context.filteredSessions.map((session) => {
@@ -394,6 +529,76 @@ function buildSessionCoverageReport(store, rawFilters) {
   }).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
 
   return { filters: context.filters, rows };
+}
+
+function buildRoomShortageReport(store, rawFilters) {
+  const context = buildReportContext(store, rawFilters);
+  const rowsByRoomPeriod = new Map();
+
+  context.filteredSessions.forEach((session) => {
+    const room = String(session.room || '').trim() || 'Unassigned Room';
+    const date = String(session.date || '').trim();
+    const startTime = String(session.startTime || '').trim();
+    const endTime = String(session.endTime || '').trim();
+    const key = `${room}|${date}|${startTime}|${endTime}`;
+    if (!rowsByRoomPeriod.has(key)) {
+      rowsByRoomPeriod.set(key, {
+        room,
+        date,
+        startTime,
+        endTime,
+        totalSessions: 0,
+        taNeeded: 0,
+        doctorNeeded: 0,
+        taAssigned: 0,
+        doctorAssigned: 0,
+      });
+    }
+    const row = rowsByRoomPeriod.get(key);
+    row.totalSessions += 1;
+    row.taNeeded += Number(session.taNeeded || 0);
+    row.doctorNeeded += Number(session.doctorNeeded || 0);
+    row.taAssigned += Number(session.taAssignments?.length || 0);
+    row.doctorAssigned += Number(session.doctorAssignments?.length || 0);
+  });
+
+  const rows = Array.from(rowsByRoomPeriod.values())
+    .map((row) => {
+      const totalNeeded = row.taNeeded + row.doctorNeeded;
+      const totalAssigned = row.taAssigned + row.doctorAssigned;
+      const taShortage = Math.max(0, row.taNeeded - row.taAssigned);
+      const doctorShortage = Math.max(0, row.doctorNeeded - row.doctorAssigned);
+      const totalShortage = taShortage + doctorShortage;
+      return {
+        ...row,
+        taShortage,
+        doctorShortage,
+        totalShortage,
+        coveragePercent: toPercent(totalAssigned, totalNeeded),
+        status: totalShortage > 0 ? 'Shortage' : 'Covered',
+      };
+    })
+    .sort((a, b) =>
+      b.totalShortage - a.totalShortage
+      || a.date.localeCompare(b.date)
+      || a.startTime.localeCompare(b.startTime)
+      || a.room.localeCompare(b.room)
+    );
+
+  const uniqueRooms = new Set(rows.map((row) => row.room));
+  const roomsWithShortage = new Set(rows.filter((row) => row.totalShortage > 0).map((row) => row.room));
+
+  const summary = {
+    totalRooms: uniqueRooms.size,
+    totalRoomPeriods: rows.length,
+    roomsWithShortage: roomsWithShortage.size,
+    roomPeriodsWithShortage: rows.filter((row) => row.totalShortage > 0).length,
+    totalTAShortage: rows.reduce((sum, row) => sum + Number(row.taShortage || 0), 0),
+    totalDoctorShortage: rows.reduce((sum, row) => sum + Number(row.doctorShortage || 0), 0),
+    totalShortage: rows.reduce((sum, row) => sum + Number(row.totalShortage || 0), 0),
+  };
+
+  return { filters: context.filters, summary, rows };
 }
 
 function buildUtilizationReport(store, rawFilters) {
@@ -458,17 +663,39 @@ function buildReportsSummary(store, rawFilters) {
   const conflicts = buildConflictReport(store, rawFilters);
   const quality = buildQualityScoreReport(store, rawFilters);
   const sessionCoverage = buildSessionCoverageReport(store, rawFilters);
+  const dailyCoverage = buildDailyCoverageReport(store, rawFilters);
+  const roomShortage = buildRoomShortageReport(store, rawFilters);
 
   const fullyCoveredCount = sessionCoverage.rows.filter((row) => row.status === 'Fully Covered').length;
+  const onCallShortage = dailyCoverage.rows.reduce(
+    (sum, row) => sum + Number(row.onCallTAGaps || 0) + Number(row.onCallDoctorGaps || 0),
+    0
+  );
   return {
     filters: workload.filters,
     cards: {
       totalStaff: workload.summary.totalStaff,
       totalAssignedHours: workload.summary.totalAssignedHours,
       averageAssignedHours: workload.summary.averageAssignedHours,
+      taAverageHours: workload.summary.taAverageHours || 0,
+      doctorAverageHours: workload.summary.doctorAverageHours || 0,
       conflictCount: conflicts.rows.length,
       qualityScore: quality.breakdown.finalScore,
       fullyCoveredSessions: fullyCoveredCount,
+      roomsWithShortage: roomShortage.summary.roomsWithShortage || 0,
+      roomShortageTotal: roomShortage.summary.totalShortage || 0,
+      sessionAssignments: workload.summary.sessionAssignments || 0,
+      sessionHours: workload.summary.sessionHours || 0,
+      superAssignments: workload.summary.superAssignments || 0,
+      superHours: workload.summary.superHours || 0,
+      controlAssignments: workload.summary.controlAssignments || 0,
+      controlHours: workload.summary.controlHours || 0,
+      onCallAssignments: workload.summary.onCallAssignments || 0,
+      onCallHours: workload.summary.onCallHours || 0,
+      onCallShortage,
+      overPolicyCount: workload.summary.overPolicyCount || 0,
+      underTargetCount: workload.summary.underTargetCount || 0,
+      excludedStaffCount: workload.summary.excludedStaffCount || 0,
     },
   };
 }
@@ -480,7 +707,9 @@ module.exports = {
   buildDailyCoverageReport,
   buildConflictReport,
   buildStaffReport,
+  buildDetailedLoadReport,
   buildSessionCoverageReport,
+  buildRoomShortageReport,
   buildUtilizationReport,
   buildQualityScoreReport,
 };

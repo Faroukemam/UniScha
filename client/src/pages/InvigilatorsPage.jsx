@@ -14,6 +14,12 @@ const emptyForm = {
   notes: ''
 };
 
+function getPrimaryImportRows(workbook, preferredSheet = 'Invigilators') {
+  const sheet = workbook.Sheets[preferredSheet]
+    || workbook.Sheets[workbook.SheetNames.find((name) => String(name).trim().toLowerCase() !== 'instructions')];
+  return sheet ? XLSX.utils.sheet_to_json(sheet) : [];
+}
+
 export default function InvigilatorsPage() {
   const [invigilators, setInvigilators] = useState([]);
   const [form, setForm] = useState(emptyForm);
@@ -89,7 +95,7 @@ export default function InvigilatorsPage() {
     try {
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: 'array' });
-      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+      const rows = getPrimaryImportRows(workbook);
       await api.importInvigilatorsRows(rows);
       showToast('Invigilators imported from Excel.', 'success');
       await load();
@@ -118,6 +124,13 @@ export default function InvigilatorsPage() {
 
   function downloadTemplate() {
     const workbook = XLSX.utils.book_new();
+    const instructions = [
+      { Section: 'Purpose', Instruction: 'Use this template to import invigilator master data.' },
+      { Section: 'Scope', Instruction: 'This import creates or updates staff records only. It does not create assignments.' },
+      { Section: 'Columns', Instruction: 'Recommended columns: StaffID, Name, Email, Role, LoadType, MaxHours, Department, Notes.' },
+      { Section: 'Role', Instruction: 'Allowed values: TA or Doctor.' },
+      { Section: 'LoadType', Instruction: 'Allowed values: full or half.' },
+    ];
     const rows = [
       {
         StaffID: '1001',
@@ -141,6 +154,7 @@ export default function InvigilatorsPage() {
       }
     ];
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Invigilators');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(instructions), 'Instructions');
     XLSX.writeFile(workbook, 'invigilators_template.xlsx');
     showToast('Invigilators template downloaded.', 'success');
   }

@@ -1,0 +1,383 @@
+UNI Exam Scheduler
+Course Room Assignment Solver Proposal
+
+1. Purpose
+
+This solver is designed to assign exam courses to rooms in the Course Room Assignment module.
+It is not a generic room booking engine.
+It is an academic exam placement solver driven by imported Excel data and academic placement rules.
+
+The solver tries to:
+- place as many students as possible
+- respect room type rules
+- respect room availability rules
+- respect Major and Minor capacity blocks
+- keep linked courses together
+- avoid unnecessary backup room usage
+- use larger rooms first when useful
+- minimize shortage and reduce wasted capacity
+
+
+2. Main Inputs
+
+The solver uses three imported datasets:
+
+A) Course Schedule
+Columns:
+- CourseCode
+- Students
+- Date
+- Start
+- End
+- RoomPlacementType
+- LinkedGroup
+- LinkedCourses
+
+B) Room Sessions / Availability
+Columns:
+- Room
+- Date
+- Start
+- End
+
+C) Room Capacity
+Columns:
+- Room
+- MinorCap
+- MajorCap
+- RoomType
+- AutoAvailable
+
+
+3. Main Solver Files
+
+Active solver path:
+- server/scripts/auto_room_assignment.py
+
+Compatibility wrapper:
+- server/scripts/course_room_assignment.py
+
+Backend runner:
+- server/courseRoomAssignment.js
+
+The web app currently runs the active solver path through the backend module.
+The compatibility wrapper remains available and forwards work to the active solver path.
+
+
+4. Core Business Rules
+
+4.1 Room Type Rules
+
+- LAB courses can use LAB rooms only.
+- DH courses can use DH rooms only.
+- TH courses should use TH rooms first.
+- TH courses may use DH or LAB only as fallback when needed.
+
+This means TH is flexible, but only as a lower-priority option.
+LAB and DH are strict.
+
+
+4.2 Room Availability Rules
+
+Availability depends on course type:
+
+- For DH courses:
+  room is eligible if Date matches and Start matches.
+  End time does not need to match.
+
+- For TH and LAB courses:
+  room is eligible only if Date matches, Start matches, and End matches.
+
+This rule exists because DH exams in the real data may reuse sessions with matching starts even when end times differ.
+
+Room overlap rule:
+- A physical room cannot be used by overlapping exams beyond its valid Major and Minor block capacities.
+- The solver checks overlapping time windows using full datetime values.
+- This prevents invalid room reuse across intersecting exam intervals.
+
+
+4.3 Repeated Course Code Rules
+
+The same CourseCode may appear in many periods.
+Example:
+- GE103 may appear in multiple rows on different days and times.
+
+These rows must remain separate unless LinkedGroup explicitly connects them.
+
+So:
+- same CourseCode alone does not merge rows
+- LinkedGroup can merge rows
+- LinkedCourses can connect rows only when they match the same period structure
+
+
+4.4 LinkedGroup Rules
+
+Courses with the same LinkedGroup are treated as one placement group.
+
+Example:
+- A = 30 students
+- B = 20 students
+- LinkedGroup = G1
+
+The solver treats them as one group of 50 students.
+
+Linked rows must agree on:
+- Date
+- Start
+- End
+- RoomPlacementType
+
+If they conflict, the backend reports validation errors.
+
+
+4.5 Major / Minor Block Rules
+
+Each physical room can have:
+- MajorCap
+- MinorCap
+
+Major and Minor are treated as separate blocks inside the same room and same period.
+
+So the same room at the same Date + Start can use:
+- Major only
+- Minor only
+- both Major and Minor together
+
+The only requirement is:
+- total students in Major block <= MajorCap
+- total students in Minor block <= MinorCap
+
+There is no limit on the number of courses inside a block.
+
+
+4.6 Group Mode Consistency
+
+Each placement group uses one mode only:
+- Major
+or
+- Minor
+
+A group may split across multiple rooms, but it cannot mix modes across rooms.
+
+Correct:
+- Group X in Room A Major
+- Group X in Room B Major
+
+Wrong:
+- Group X in Room A Major
+- Group X in Room B Minor
+
+
+4.7 No Overflow Rule
+
+The solver does not use any 10% capacity overflow.
+
+If a block capacity is 100, the assigned students in that block cannot exceed 100.
+
+If capacity is not enough:
+- the group is partially assigned
+- or marked with shortage
+- or left unassigned
+
+
+5. Solver Strategy
+
+5.1 Input Validation
+
+Before optimization, the backend validates:
+- missing CourseCode
+- non-positive Students
+- invalid Date / Start / End
+- Start >= End
+- invalid RoomPlacementType
+- duplicate room capacity rows
+- room sessions that reference unknown rooms
+- linked groups with conflicting timing or type
+
+Invalid rows are stored as validation errors.
+
+
+5.2 Group Building
+
+The solver converts imported course rows into placement groups.
+
+If Group Linked Courses is enabled:
+- LinkedGroup rows are merged
+- same course code rows remain separate unless explicitly linked
+
+The groups are sorted with larger groups first because large groups are harder to place.
+
+
+5.3 Candidate Room Filtering
+
+For each group, the solver checks every room against:
+- room availability rule
+- room type compatibility
+- room capacity presence
+- AutoAvailable usage policy
+
+Rooms that fail these checks are removed from that group’s candidate list.
+
+
+5.4 Shared Room Model
+
+The solver allows multiple groups to share the same room and period.
+
+It tracks room usage at block level:
+- Room + Date + Start + End + Major
+- Room + Date + Start + End + Minor
+
+Then it applies:
+- Sum of assigned students in Major block <= MajorCap
+- Sum of assigned students in Minor block <= MinorCap
+
+This supports dense packing of many courses into the same room when the total fits.
+
+
+5.5 Bigger Room Preference
+
+The solver prefers larger compatible rooms first.
+
+This helps:
+- reduce fragmentation
+- avoid opening too many small rooms
+- pack more courses efficiently into large rooms
+
+This is implemented as an optimization preference, not as a hard rule.
+
+
+6. AutoAvailable Two-Stage Strategy
+
+AutoAvailable rooms are backup rooms only.
+
+They are not treated as normal rooms in the first solve.
+
+Stage 1: NormalOnly
+- run solver with AutoAvailable excluded
+
+Stage 2: BackupEnabled
+- run solver with AutoAvailable allowed
+
+Then the backend compares both results and keeps only the better one.
+
+Comparison order:
+1. lower total shortage students
+2. fewer unassigned groups
+3. fewer capacity shortage groups
+4. lower waste
+5. fewer used physical rooms
+6. fewer used blocks
+
+If backup does not improve the result, the backend keeps the normal-only solution.
+
+This prevents AutoAvailable from making the final result worse.
+
+
+7. Backend Persistence
+
+After the backend chooses the final scenario:
+- results are saved to SQLite
+- room rows are saved to SQLite
+- the quality report is cached in SQLite metadata
+
+This allows:
+- fast reload in the tab
+- fast export
+- no repeated heavy solve just to export
+
+
+8. Outputs
+
+The solver produces:
+
+A) Placement Results
+- PlacementGroupID
+- CourseCodes
+- LinkedGroup
+- TotalStudents
+- Date
+- Start
+- End
+- RoomPlacementType
+- CapacityMode
+- AssignedRooms
+- AssignedCapacity
+- WasteCapacity
+- Shortage
+- AutoAvailableUsed
+- Status
+- Notes
+
+B) Room Rows
+- PlacementGroupID
+- CourseCodes
+- LinkedGroup
+- Room
+- RoomType
+- CapacityMode
+- RoomCapacity
+- StudentsAssignedToThisRoom
+- BlockTotalAssignedStudentsAtThisTime
+- BlockRemainingCapacityAtThisTime
+- PhysicalRoomTotalAssignedStudentsAtThisTime
+- Date
+- Start
+- End
+- Status
+
+C) Quality Report
+- AutoAvailable usage analysis
+- necessity analysis
+- stage comparison
+- shortage analysis
+- large-room utilization analysis
+
+
+9. Current Practical Interpretation
+
+This solver is best viewed as:
+- a constrained packing model
+- with academic placement rules
+- using shared room blocks
+- and a rescue-stage backup policy
+
+It is not trying to produce a perfect theoretical timetable.
+It is trying to produce the best practical room placement under dense real exam conditions.
+
+
+10. Recommended Operational Flow
+
+1. Import course schedule.
+2. Import room sessions.
+3. Import room capacities.
+4. Run Course Room Assignment.
+5. Review:
+   - placement grid
+   - shortages
+   - quality report
+   - used / unused rooms
+6. Export final workbook.
+
+
+11. Future Improvement Ideas
+
+Possible future improvements:
+- rescue-only second stage for unresolved groups instead of full second solve
+- stronger room locking to preserve good Stage 1 assignments
+- explicit explanation codes for each shortage
+- scenario comparison UI in the Course Room tab
+- faster incremental manual re-optimization
+
+
+12. Final Summary
+
+The Course Room Assignment solver works by:
+- validating imported exam data
+- building period-based placement groups
+- applying room type and availability rules
+- assigning students into Major and Minor room blocks
+- allowing shared rooms when capacity allows
+- preferring larger rooms first
+- then using AutoAvailable rooms only through a controlled second-stage fallback
+
+This design is intended for dense academic exam scheduling where capacity pressure, repeated courses, linked courses, and mixed room constraints all exist at the same time.
