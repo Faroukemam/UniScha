@@ -63,12 +63,27 @@ async function apiFetch(path, options = {}) {
     ...fetchOptions
   });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(error.error || 'Request failed');
+  const responseText = await response.text();
+  let payload = null;
+  try {
+    payload = responseText ? JSON.parse(responseText) : null;
+  } catch (_error) {
+    payload = null;
   }
 
-  const payload = await response.json();
+  if (!response.ok) {
+    const serverMessage = payload && typeof payload === 'object'
+      ? (payload.error || payload.message)
+      : '';
+    const fallbackMessage = response.status === 413
+      ? 'Import data is too large for the server to accept.'
+      : `Request failed (${response.status}${response.statusText ? ` ${response.statusText}` : ''}).`;
+    throw new Error(serverMessage || fallbackMessage);
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The server returned an invalid response. Please refresh and try again.');
+  }
   if (shouldUseAppCache) {
     getCache.set(cacheKey, payload);
   } else if (method !== 'GET') {

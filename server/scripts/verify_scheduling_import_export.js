@@ -224,6 +224,27 @@ async function run() {
   try {
     await waitForServer(baseUrl);
 
+    const guardedImportRoutes = [
+      '/api/import/sessions',
+      '/api/import/session-needs',
+      '/api/import/control-sessions',
+      '/api/import/control-session-loads',
+      '/api/import/invigilators',
+      '/api/import/staff-hour-policies',
+      '/api/import/engagements',
+      '/api/course-room-assignment/import-schedule',
+      '/api/course-room-assignment/import-room-sessions',
+      '/api/course-room-assignment/import-room-capacity',
+    ];
+    for (const route of guardedImportRoutes) {
+      const { response, payload } = await requestJson(`${baseUrl}${route}`, {
+        method: 'POST',
+        body: JSON.stringify({ rows: [] }),
+      });
+      assert(response.status === 400, `Expected ${route} to reject an empty import with HTTP 400.`);
+      assert(String(payload.error || '').includes('contains no data rows'), `Expected ${route} to return a useful empty-import error.`);
+    }
+
     const exportCurrent = await getJson(`${baseUrl}/api/scheduling/export/current`);
     const currentValidation = validateWorkbookFile(
       tempRepoRoot,
@@ -424,6 +445,20 @@ async function run() {
     const finalScheduling = await getJson(`${baseUrl}/api/scheduling`);
     assert(countSchedulingAssignments(finalScheduling) === assignmentsBefore - 1, 'Expected isolated add/remove flow to leave one removed original assignment in temp verification dataset.');
 
+    const sessionImport = await getJson(`${baseUrl}/api/import/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        rows: [
+          { Room: 'Hall C', CourseCode: 'IMP101', Date: '2026-06-03', Start: '09:00', End: '11:00', TANeeded: 2, DoctorNeeded: 1 },
+          { Room: 'Hall C', CourseCode: 'IMP102', Date: '2026-06-03', Start: '09:00', End: '12:00', TANeeded: 1, DoctorNeeded: 2 },
+        ],
+      }),
+    });
+    assert(Number(sessionImport.rowsImported || 0) === 2, 'Expected the Sessions import endpoint to accept valid rows.');
+    assert(Number(sessionImport.sessionsCreatedAfterMerge || 0) === 1, 'Expected matching Sessions import rows to merge into one block.');
+    const importedSessions = await getJson(`${baseUrl}/api/sessions`);
+    assert(importedSessions.length === 1 && importedSessions[0].endTime === '12:00', 'Expected imported Sessions block to preserve the latest End time.');
+
     console.log(JSON.stringify({
       result: 'PASS',
       exports: {
@@ -459,6 +494,11 @@ async function run() {
       finalCounts: {
         before: assignmentsBefore,
         final: countSchedulingAssignments(finalScheduling),
+      },
+      sessionImport: {
+        rowsImported: sessionImport.rowsImported,
+        sessionsCreatedAfterMerge: sessionImport.sessionsCreatedAfterMerge,
+        rowsMerged: sessionImport.rowsMerged,
       },
     }, null, 2));
   } finally {

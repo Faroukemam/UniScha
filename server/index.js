@@ -16,6 +16,7 @@ const {
   getSessionRoomStartKey,
   getSessionRoomStartCourseKey,
   getSessionRoomTimeKey,
+  parseTimeToMinutes,
   getDurationMinutes,
   getStoreVersion,
   getCachedDerivedView,
@@ -71,7 +72,11 @@ if (!fs.existsSync(tempDir)) {
 }
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+// Excel files are parsed in the browser then sent as JSON rows.  A workbook can
+// be small on disk but expand considerably once serialized, so keep a practical
+// import limit and return a JSON error when it is exceeded.
+const IMPORT_JSON_LIMIT = process.env.IMPORT_JSON_LIMIT || '50mb';
+app.use(express.json({ limit: IMPORT_JSON_LIMIT }));
 app.use('/temp', express.static(tempDir));
 app.use('/api/temp', express.static(tempDir));
 
@@ -117,6 +122,27 @@ function getCachedRoutePayload(name, cacheKey, builder) {
 
 function respondError(res, message, status = 400) {
   return res.status(status).json({ error: message });
+}
+
+function readImportRows(req, res, label) {
+  if (!req.body || !Array.isArray(req.body.rows)) {
+    respondError(res, `${label} import must contain a rows array.`);
+    return null;
+  }
+
+  const rows = req.body.rows;
+  if (!rows.length) {
+    respondError(res, `${label} import contains no data rows. Select a worksheet with headers and at least one record.`);
+    return null;
+  }
+
+  const invalidRow = rows.findIndex((row) => !row || typeof row !== 'object' || Array.isArray(row));
+  if (invalidRow >= 0) {
+    respondError(res, `${label} import row ${invalidRow + 2} is not a valid spreadsheet record.`);
+    return null;
+  }
+
+  return rows;
 }
 
 function respondPersistenceError(res, error) {
@@ -4451,7 +4477,8 @@ app.post('/api/room-capability/optimize', (req, res) => {
 
 app.post('/api/import/sessions', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const rows = readImportRows(req, res, 'Sessions');
+  if (!rows) return;
   const previousSessionCount = store.sessions.length;
   const previousAssignmentsCount = store.assignments.length;
   const nextSessions = normalizeImportedSessions(rows, store.sessions, false);
@@ -4485,7 +4512,8 @@ app.post('/api/import/sessions', (req, res) => {
 
 app.post('/api/import/session-needs', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const rows = readImportRows(req, res, 'Session needs');
+  if (!rows) return;
   const byId = new Map(store.sessions.map((session) => [String(session.id), session]));
   const byBlock = new Map(store.sessions.map((session) => [buildSessionRoomStartKey(session), session]));
   const byBlockCourse = new Map(store.sessions.map((session) => [buildSessionBlockCourseKey(session), session]));
@@ -4550,7 +4578,8 @@ app.post('/api/import/session-needs', (req, res) => {
 
 app.post('/api/import/control-sessions', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const rows = readImportRows(req, res, 'Control sessions');
+  if (!rows) return;
   store.controlSessions = rows
     .map((row, index) => normalizeControlSessionRow(row, index, false))
     .filter((row) => row.date && row.startTime && row.endTime);
@@ -4560,10 +4589,8 @@ app.post('/api/import/control-sessions', (req, res) => {
 
 app.post('/api/import/control-session-loads', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
-  if (!rows.length) {
-    return respondError(res, 'ControlAssignments rows are required.');
-  }
+  const rows = readImportRows(req, res, 'Control assignments');
+  if (!rows) return;
   const result = processControlAssignmentImportRows(store, rows);
   return persistStoreResponse(res, result.nextStore, {
     success: true,
@@ -4579,7 +4606,8 @@ app.post('/api/import/control-session-loads', (req, res) => {
 
 app.post('/api/import/invigilators', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const rows = readImportRows(req, res, 'Invigilators');
+  if (!rows) return;
   store.invigilators = rows
     .map((row, index) => normalizeInvigilatorRow(row, index, false))
     .filter((row) => row.staffId || row.name);
@@ -4594,7 +4622,8 @@ app.post('/api/import/invigilators', (req, res) => {
 
 app.post('/api/import/staff-hour-policies', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const rows = readImportRows(req, res, 'Staff hour policies');
+  if (!rows) return;
   const importedPolicies = [];
   const rejected = [];
   let updated = 0;
@@ -4641,7 +4670,8 @@ app.post('/api/import/staff-hour-policies', (req, res) => {
 
 app.post('/api/import/engagements', (req, res) => {
   const store = readStore();
-  const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+  const rows = readImportRows(req, res, 'Engagements');
+  if (!rows) return;
   store.engagements = rows
     .map((row, index) => normalizeEngagementRow(row, index, false))
     .filter((row) => row.staffId && row.date && row.startTime && row.endTime);
@@ -4901,7 +4931,8 @@ app.get('/api/course-room-assignment/quality', async (_req, res) => {
 
 app.post('/api/course-room-assignment/import-schedule', async (req, res) => {
   try {
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const rows = readImportRows(req, res, 'Course-room schedule');
+    if (!rows) return;
     res.json(await importCourseRoomScheduleRows(rows));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -4910,7 +4941,8 @@ app.post('/api/course-room-assignment/import-schedule', async (req, res) => {
 
 app.post('/api/course-room-assignment/import-room-sessions', async (req, res) => {
   try {
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const rows = readImportRows(req, res, 'Course-room sessions');
+    if (!rows) return;
     res.json(await importCourseRoomSessionRows(rows));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -4919,7 +4951,8 @@ app.post('/api/course-room-assignment/import-room-sessions', async (req, res) =>
 
 app.post('/api/course-room-assignment/import-room-capacity', async (req, res) => {
   try {
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const rows = readImportRows(req, res, 'Course-room capacity');
+    if (!rows) return;
     res.json(await importCourseRoomCapacityRows(rows));
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -5115,6 +5148,26 @@ app.get('*', (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
   return res.sendFile(path.join(clientBuild, 'index.html'));
+});
+
+// Keep API failures JSON-shaped. Without this handler, malformed or oversized
+// JSON import payloads are rendered as Express HTML and the client can only say
+// "Request failed", which makes spreadsheet problems impossible to diagnose.
+app.use((error, req, res, _next) => {
+  if (res.headersSent) return;
+
+  if (error?.type === 'entity.too.large' || error?.status === 413) {
+    return res.status(413).json({
+      error: `Import data is too large. Reduce the worksheet size or ask an administrator to increase IMPORT_JSON_LIMIT (currently ${IMPORT_JSON_LIMIT}).`,
+    });
+  }
+
+  if (error?.type === 'entity.parse.failed' || error instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Import data is not valid JSON. Please select and import the Excel file again.' });
+  }
+
+  console.error('[api] unhandled request error:', error);
+  return res.status(error?.status || 500).json({ error: 'Unexpected server error while processing the request.' });
 });
 
 async function startServer() {
