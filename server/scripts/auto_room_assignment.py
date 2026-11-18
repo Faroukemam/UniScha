@@ -1,6 +1,7 @@
 import json
 import math
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime
 
@@ -335,11 +336,12 @@ def availability_matches(room, group, availability_rows):
             continue
         if row["date"] != group["date"]:
             continue
-        if row["start"] != group["start"]:
-            continue
+        # DH sessions retain their existing start-only availability rule.
         if group["roomPlacementType"] == "DH":
-            return True
-        if row["end"] == group["end"]:
+            if row["start"] == group["start"]:
+                return True
+            continue
+        if row["startDt"] <= group["startDt"] and group["endDt"] <= row["endDt"]:
             return True
     return False
 
@@ -364,16 +366,111 @@ def build_checkpoints(groups):
     }
 
 
+def greedy_assignments(groups, eligible_pairs, pair_meta, config):
+    """Produce a feasible starting layout without relaxing any room rules."""
+    candidates = defaultdict(list)
+    for key in eligible_pairs:
+        candidates[key[0]].append(key)
+    modes = [mode for mode in ("Major", "Minor")
+             if config["capacity_strategy"] in {"best", "", mode.lower()}]
+    best = None
+    for strict_first in (True, False):
+        allocation = {}
+        occupied = defaultdict(list)
+        shortage = 0
+        ordered = sorted(groups, key=lambda group: (
+            group["roomPlacementType"] == "TH" if strict_first else False,
+            -group["totalStudents"], group["placementGroupId"],
+        ))
+        for group in ordered:
+            remaining = group["totalStudents"]
+            used = set()
+            while remaining > 0:
+                choices = []
+                for key in candidates[group["placementGroupId"]]:
+                    if key in used:
+                        continue
+                    room = pair_meta[key]["room"]
+                    overlapping = [item for item in occupied[key[1]] if intervals_overlap(
+                        group["startDt"], group["endDt"], item[0]["startDt"], item[0]["endDt"])]
+                    if any(item[0]["startDt"] != group["startDt"] or item[0]["endDt"] != group["endDt"]
+                           for item in overlapping):
+                        continue
+                    for mode in modes:
+                        capacity = int(room["majorCap"] if mode == "Major" else room["minorCap"])
+                        total = sum(item[2] for item in overlapping if item[1] == mode)
+                        non_dh = sum(item[2] for item in overlapping
+                                     if item[1] == mode and item[0]["roomPlacementType"] != "DH")
+                        extra = overflow_extra(capacity)
+                        limit = capacity + (min(extra, non_dh) if group["roomPlacementType"] == "DH" else extra)
+                        available = max(0, limit - total)
+                        if available:
+                            choices.append((min(remaining, available), -pair_meta[key]["type_penalty"],
+                                            -available, key, mode))
+                if not choices:
+                    break
+                amount, _, _, key, mode = max(choices)
+                allocation[key] = (mode, amount)
+                occupied[key[1]].append((group, mode, amount))
+                used.add(key)
+                remaining -= amount
+            shortage += remaining
+        if best is None or shortage < best[0]:
+            best = (shortage, allocation)
+    return best[1]
+
+
 def solve(payload):
     config = load_payload(payload)
     courses, availability_rows, capacities, validation_errors = validate_inputs(config)
     groups = build_groups(courses, bool(config["group_linked_courses"]), validation_errors)
     rooms = build_rooms(capacities)
+
+    # Periods with no overlapping exams cannot compete for a room. Solve these
+    # independently, retaining the globally built linked groups and their IDs.
+    components = []
+    latest_end = None
+    for group in sorted(groups, key=lambda item: item["startDt"]):
+        if latest_end is None or group["startDt"] >= latest_end:
+            components.append([])
+            latest_end = group["endDt"]
+        components[-1].append(group)
+        latest_end = max(latest_end, group["endDt"])
+
+    combined = None
+    deadline = time.monotonic() + max(0.1, config["time_limit_seconds"])
+    for index, component in enumerate(components or [[]]):
+        remaining_components = components[index:] or [[]]
+        remaining_weight = sum(max(1, len(items)) for items in remaining_components)
+        budget = max(0.01, deadline - time.monotonic()) * max(1, len(component)) / remaining_weight
+        component_config = {**config, "time_limit_seconds": budget}
+        result = solve_component(component_config, courses, availability_rows, rooms, component)
+        if result["status"] not in {"OPTIMAL", "FEASIBLE"}:
+            emit({**result, "validationErrors": validation_errors + result.get("validationErrors", [])})
+        if combined is None:
+            combined = result
+        else:
+            if result["status"] != "OPTIMAL":
+                combined["status"] = "FEASIBLE"
+            for field in ("results", "roomRows", "unassigned", "validationErrors", "groups"):
+                combined[field].extend(result[field])
+            for field in combined["summary"]:
+                if field != "totalCourses":
+                    combined["summary"][field] += result["summary"][field]
+
+    combined["validationErrors"] = validation_errors + combined["validationErrors"]
+    for field in ("results", "roomRows", "unassigned"):
+        combined[field].sort(key=lambda item: (item["date"], item["start"], item.get("room", ""), item["placementGroupId"]))
+    emit(combined)
+
+
+def solve_component(config, courses, availability_rows, rooms, groups):
+    validation_errors = []
     checkpoints_by_date = build_checkpoints(groups)
     locked_assignments = config.get("locked_assignments") or []
 
     if not groups:
-        emit({
+        return {
             "status": "OPTIMAL",
             "results": [],
             "roomRows": [],
@@ -390,7 +487,7 @@ def solve(payload):
             },
             "validationErrors": validation_errors,
             "groups": [],
-        })
+        }
 
     mode_allow_major = config["capacity_strategy"] in {"best", "major", ""}
     mode_allow_minor = config["capacity_strategy"] in {"best", "minor", ""}
@@ -646,17 +743,10 @@ def solve(payload):
 
     waste_terms = []
     block_use_terms = []
-    physical_totals = {}
+    physical_totals = {key[:4]: None for key in block_pairs}
     block_info_map = {}
     block_waste_vars = {}
     block_total_vars = {}
-    for room in rooms:
-        for group in groups:
-            if group["date"] is None:
-                continue
-            block_key = (room["room"].lower(), group["date"], group["start"], group["end"])
-            physical_totals.setdefault(block_key, None)
-
     for (room_key, date, start, end, mode), keys in block_pairs.items():
         room = pair_meta[keys[0]]["room"]
         capacity = int(room["majorCap"] if mode == "Major" else room["minorCap"])
@@ -751,9 +841,8 @@ def solve(payload):
         shortage_terms.append(group_shortage[gid])
         unassigned_group_terms.append(unassigned)
 
-    objective = (
-        (sum(shortage_terms) * 1000000000)
-        + (sum(unassigned_group_terms) * 10000000)
+    quality_objective = (
+        (sum(unassigned_group_terms) * 10000000)
         + (sum(capacity_shortage_group_terms) * 1000000)
         + (sum(backup_terms) * 10000)
         + (sum(tiny_assignment_terms) * 3000)
@@ -765,20 +854,73 @@ def solve(payload):
         + (sum(fallback_terms) * 5)
         + sum(room_priority_terms)
     )
-    model.Minimize(objective)
+    # Coverage is a separate solve so room preferences can never buy a shortage.
+    shortage_objective = sum(shortage_terms)
+    model.Minimize(shortage_objective)
 
     if search_assignment_vars:
         ordered_assignments = [var for _students, _capacity, var in sorted(search_assignment_vars, key=lambda item: (-item[0], -item[1]))]
         model.AddDecisionStrategy(ordered_assignments, cp_model.CHOOSE_FIRST, cp_model.SELECT_MAX_VALUE)
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = float(config["time_limit_seconds"])
-    solver.parameters.num_search_workers = 8
+    budget = max(0.001, float(config["time_limit_seconds"]))
+    started = time.monotonic()
+    incumbent_solver = None
+    if not locked_assignments:
+        initial = greedy_assignments(groups, eligible_pairs, pair_meta, config)
+        fixed_model = model.Clone()
+        for key in eligible_pairs:
+            mode, amount = initial.get(key, ("", 0))
+            fixed_model.Add(assign_major[key] == (amount if mode == "Major" else 0))
+            fixed_model.Add(assign_minor[key] == (amount if mode == "Minor" else 0))
+        initial_solver = cp_model.CpSolver()
+        # Validating a fully fixed layout is quick, but must have enough time
+        # even for a dense component near the end of the overall time budget.
+        initial_solver.parameters.max_time_in_seconds = max(1.0, budget * 0.2)
+        initial_solver.parameters.num_search_workers = 1
+        initial_status = initial_solver.Solve(fixed_model)
+        if initial_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            incumbent_solver = initial_solver
+            for variable_index in range(len(model.Proto().variables)):
+                var = model.GetIntVarFromProtoIndex(variable_index)
+                model.AddHint(var, initial_solver.Value(var))
+            model.Add(shortage_objective <= sum(int(initial_solver.Value(var)) for var in shortage_terms))
+    solver.parameters.max_time_in_seconds = max(0.001, budget * 0.75 - (time.monotonic() - started))
+    solver.parameters.num_search_workers = 4
     status = solver.Solve(model)
 
+    if status == cp_model.UNKNOWN and incumbent_solver is not None:
+        solver = incumbent_solver
+        status = cp_model.FEASIBLE
+
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        coverage_proven = status == cp_model.OPTIMAL
+        best_shortage = sum(int(solver.Value(var)) for var in shortage_terms)
+        remaining = budget - (time.monotonic() - started)
+        if remaining > 0.01:
+            # Keep the coverage incumbent if the quality pass times out. Hinting
+            # every variable also gives that pass an immediately usable layout.
+            model.ClearHints()
+            for variable_index in range(len(model.Proto().variables)):
+                var = model.GetIntVarFromProtoIndex(variable_index)
+                model.AddHint(var, solver.Value(var))
+            model.Add(shortage_objective == best_shortage)
+            model.Minimize(quality_objective)
+            quality_solver = cp_model.CpSolver()
+            quality_solver.parameters.max_time_in_seconds = remaining
+            quality_solver.parameters.num_search_workers = 4
+            quality_status = quality_solver.Solve(model)
+            if quality_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                solver = quality_solver
+                status = quality_status if coverage_proven else cp_model.FEASIBLE
+            else:
+                status = cp_model.FEASIBLE
+        else:
+            status = cp_model.FEASIBLE
+
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        emit({
-            "status": "INFEASIBLE",
+        return {
+            "status": solver.StatusName(status),
             "results": [],
             "roomRows": [],
             "unassigned": [],
@@ -794,7 +936,7 @@ def solve(payload):
             },
             "validationErrors": validation_errors,
             "groups": [],
-        })
+        }
 
     room_block_info = {}
     for block_key, info in block_info_map.items():
@@ -950,7 +1092,7 @@ def solve(payload):
         "backupRoomsUsed": sum(1 for row in results if row["autoAvailableUsed"]),
     }
 
-    emit({
+    return {
         "status": "OPTIMAL" if status == cp_model.OPTIMAL else "FEASIBLE",
         "results": sorted(results, key=lambda item: (item["date"], item["start"], item["placementGroupId"])),
         "roomRows": sorted(room_rows, key=lambda item: (item["date"], item["start"], item["room"], item["placementGroupId"])),
@@ -970,7 +1112,7 @@ def solve(payload):
             }
             for group in groups
         ],
-    })
+    }
 
 
 if __name__ == "__main__":

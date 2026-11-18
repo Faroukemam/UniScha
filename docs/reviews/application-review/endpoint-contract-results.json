@@ -1,0 +1,1106 @@
+{
+  "routeCount": 104,
+  "requestCount": 136,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/scheduling/config"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/config"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/combined"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/combined/preview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/combined/apply"
+    },
+    {
+      "method": "GET",
+      "path": "/api/dashboard"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/storage-status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/sessions/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/invigilators"
+    },
+    {
+      "method": "POST",
+      "path": "/api/invigilators"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/invigilators/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/invigilators/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/invigilators"
+    },
+    {
+      "method": "GET",
+      "path": "/api/staff-hour-policies"
+    },
+    {
+      "method": "POST",
+      "path": "/api/staff-hour-policies"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/staff-hour-policies/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/staff-hour-policies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/engagements"
+    },
+    {
+      "method": "POST",
+      "path": "/api/engagements"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/engagements/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/engagements/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/engagements"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/session/:sessionId/eligible"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/export/current"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/export/assignment-template"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/export/committee-assignment-template"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/import/assignment-actions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/import/committee-assignments"
+    },
+    {
+      "method": "GET",
+      "path": "/api/on-call"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/on-call/config"
+    },
+    {
+      "method": "GET",
+      "path": "/api/on-call/eligible"
+    },
+    {
+      "method": "POST",
+      "path": "/api/on-call/auto-assign"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/assign"
+    },
+    {
+      "method": "POST",
+      "path": "/api/on-call/assign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/scheduling/assign/:id"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/:id/lock"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/bulk-lock"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/lock-by-filter"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/scheduling/assign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/on-call/assign/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/on-call/assign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/super-invigilators"
+    },
+    {
+      "method": "GET",
+      "path": "/api/super-invigilators/export"
+    },
+    {
+      "method": "POST",
+      "path": "/api/super-invigilators/assign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/super-invigilators/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/super-invigilators"
+    },
+    {
+      "method": "GET",
+      "path": "/api/control-sessions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/control-sessions/export"
+    },
+    {
+      "method": "GET",
+      "path": "/api/control-sessions/template/export"
+    },
+    {
+      "method": "POST",
+      "path": "/api/control-sessions"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/control-sessions/:id"
+    },
+    {
+      "method": "POST",
+      "path": "/api/control-sessions/assign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/control-sessions/assign/:id"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/control-sessions"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/control-sessions/:id"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workload"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/auto-schedule-preview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/auto-schedule-preview/export"
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/assign/lock-plan/export"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/assign/lock-plan/import"
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/auto-schedule"
+    },
+    {
+      "method": "POST",
+      "path": "/api/room-capability/optimize"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/session-needs"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/control-sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/control-session-loads"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/invigilators"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/staff-hour-policies"
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/engagements"
+    },
+    {
+      "method": "POST",
+      "path": "/api/data/load-sample"
+    },
+    {
+      "method": "GET",
+      "path": "/api/export/workbook"
+    },
+    {
+      "method": "GET",
+      "path": "/api/export/staff-hour-policies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/export/staff-hour-policies/template"
+    },
+    {
+      "method": "GET",
+      "path": "/api/day-coverage"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/summary"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/workload"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/fairness"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/daily-coverage"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/room-shortage"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/engagement-overrides"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/conflicts"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/detailed-load"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/staff/:staffId"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/session-coverage"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/utilization"
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/quality-score"
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment/quality"
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/import-schedule"
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/import-room-sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/import-room-capacity"
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/run"
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/manual-assign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/course-room-assignment/results"
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment/export"
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment/export-unassigned"
+    },
+    {
+      "method": "GET",
+      "path": "/api/data/export"
+    },
+    {
+      "method": "POST",
+      "path": "/api/data/import"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/data/reset"
+    }
+  ],
+  "calls": [
+    {
+      "method": "POST",
+      "path": "/api/invigilators",
+      "status": 201
+    },
+    {
+      "method": "PUT",
+      "path": "/api/invigilators/inv_1794999689572_hrjbq0",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 201
+    },
+    {
+      "method": "PUT",
+      "path": "/api/sessions/ses_1794999689676_ihd8ql",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/engagements",
+      "status": 201
+    },
+    {
+      "method": "PUT",
+      "path": "/api/engagements/eng_1794999689804_1mqw2b",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/control-sessions",
+      "status": 201
+    },
+    {
+      "method": "PUT",
+      "path": "/api/control-sessions/ctlses_1794999689879_fod7by",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/assign",
+      "status": 201
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/asg_1794999689965_zf355l/lock",
+      "status": 200
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/bulk-lock",
+      "status": 200
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/lock-by-filter",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/control-sessions/assign",
+      "status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/api/on-call/assign",
+      "status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/api/super-invigilators/assign",
+      "status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/combined/preview",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/combined/apply",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/combined/apply",
+      "status": 409
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/auto-schedule-preview",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/auto-schedule-preview/export",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/auto-schedule",
+      "status": 200
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/on-call/config",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/data/export",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/data/import",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/data/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/data/export",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/super-invigilators/assign",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/engagements",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/engagements",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/engagements",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/engagements",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/control-sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/control-sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/invigilators",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/invigilators",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/invigilators",
+      "status": 400
+    },
+    {
+      "method": "PUT",
+      "path": "/api/sessions/ses_1794999689676_ihd8ql",
+      "status": 400
+    },
+    {
+      "method": "PUT",
+      "path": "/api/control-sessions/ctlses_1794999689879_fod7by",
+      "status": 400
+    },
+    {
+      "method": "PUT",
+      "path": "/api/invigilators/inv_1794999689572_hrjbq0",
+      "status": 400
+    },
+    {
+      "method": "PUT",
+      "path": "/api/invigilators/inv_1794999689572_hrjbq0",
+      "status": 400
+    },
+    {
+      "method": "PUT",
+      "path": "/api/engagements/eng_1794999689804_1mqw2b",
+      "status": 400
+    },
+    {
+      "method": "GET",
+      "path": "/api/data/export",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/data/import",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/engagements/eng_1794999689804_1mqw2b",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/invigilators/inv_1794999689572_hrjbq0",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/config",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/combined",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/dashboard",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/storage-status",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/invigilators",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/staff-hour-policies",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/engagements",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/session/S1/eligible",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/export/current",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/export/assignment-template",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/export/committee-assignment-template",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/on-call",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/on-call/eligible?date=2026-11-18&startTime=09%3A00&endTime=10%3A00",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/super-invigilators",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/super-invigilators/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/control-sessions",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/control-sessions/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/control-sessions/template/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/workload",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/scheduling/assign/lock-plan/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/export/workbook",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/export/staff-hour-policies",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/export/staff-hour-policies/template",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/day-coverage",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/summary",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/workload",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/fairness",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/daily-coverage",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/room-shortage",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/engagement-overrides",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/conflicts",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/detailed-load",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/staff/A",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/session-coverage",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/utilization",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/quality-score",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment/quality",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/course-room-assignment/export-unassigned",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/data/export",
+      "status": 200
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/config",
+      "status": 400
+    },
+    {
+      "method": "PUT",
+      "path": "/api/sessions/missing",
+      "status": 404
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions",
+      "status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/api/invigilators/missing",
+      "status": 404
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/invigilators/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/invigilators",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/staff-hour-policies",
+      "status": 400
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/staff-hour-policies/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/staff-hour-policies",
+      "status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/api/engagements/missing",
+      "status": 404
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/engagements/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/engagements",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/import/assignment-actions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/import/committee-assignments",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/on-call/auto-assign",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/scheduling/assign/missing",
+      "status": 200
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/scheduling/assign/missing/lock",
+      "status": 404
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/scheduling/assign",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/on-call/assign/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/on-call/assign",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/super-invigilators/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/super-invigilators",
+      "status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/api/control-sessions/missing",
+      "status": 404
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/control-sessions/assign/missing",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/control-sessions",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/control-sessions/missing",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/scheduling/assign/lock-plan/import",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/room-capability/optimize",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/session-needs",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/control-sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/control-session-loads",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/invigilators",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/staff-hour-policies",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/import/engagements",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/data/load-sample",
+      "status": 404
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/import-schedule",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/import-room-sessions",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/import-room-capacity",
+      "status": 400
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/run",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/course-room-assignment/manual-assign",
+      "status": 400
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/course-room-assignment/results",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/data/reset",
+      "status": 200
+    }
+  ],
+  "failures": [],
+  "note": "Every route received a contract probe. A probe may exercise an expected error path; it is not proof of every success branch."
+}

@@ -47,11 +47,14 @@ function getStoreVersion() {
   return storeVersion;
 }
 
-function getCachedDerivedView(name, builder, cacheKey = 'default') {
+function getCachedDerivedView(name, builder, cacheKey = 'default', sourceStore = null) {
   const key = `${name}|${cacheKey}`;
   const currentVersion = getStoreVersion();
+  // Preview and eligibility calculations also operate on edited copies before
+  // persistence. A global version alone cannot identify their inputs.
+  const sourceSnapshot = sourceStore ? JSON.stringify(sourceStore) : null;
   const cached = derivedViewCache.get(key);
-  if (cached && cached.version === currentVersion) {
+  if (cached && cached.version === currentVersion && cached.sourceSnapshot === sourceSnapshot) {
     logCache(`[cache] ${name} hit version=${currentVersion}`);
     return cached.value;
   }
@@ -61,8 +64,25 @@ function getCachedDerivedView(name, builder, cacheKey = 'default') {
     logCache(`[cache] ${name} miss version=${currentVersion}`);
   }
   const value = builder();
-  derivedViewCache.set(key, { version: currentVersion, value });
+  derivedViewCache.set(key, { version: currentVersion, sourceSnapshot, value });
   return value;
+}
+
+const SCHEDULING_PREFERENCES = ['engagement_overrides', 'consecutive_days', 'consecutive_duties', 'daily_soft_target'];
+const SCHEDULING_WEIGHTS = { engagement_overrides: 100, consecutive_days: 50, consecutive_duties: 10, daily_soft_target: 1 };
+
+function normalizeSchedulingConfig(config = {}) {
+  const supplied = Array.isArray(config.preferenceOrder) ? config.preferenceOrder : [];
+  const preferenceOrder = [...new Set(supplied.filter((key) => SCHEDULING_PREFERENCES.includes(key)))];
+  SCHEDULING_PREFERENCES.forEach((key) => { if (!preferenceOrder.includes(key)) preferenceOrder.push(key); });
+  const target = Number(config.dailySoftTarget ?? 2);
+  const weights = Object.fromEntries(SCHEDULING_PREFERENCES.map((key) => {
+    const weight = config.weights?.[key];
+    return [key, Number.isInteger(weight) && weight >= 0 && weight <= 1000 ? weight : SCHEDULING_WEIGHTS[key]];
+  }));
+  if (!Object.values(weights).some((weight) => weight > 0)) Object.assign(weights, SCHEDULING_WEIGHTS);
+  return { preferenceOrder, dailySoftTarget: Number.isInteger(target) && target >= 0 && target <= 20 ? target : 2,
+    scoringMode: config.scoringMode === 'weighted' ? 'weighted' : 'ranked', weights };
 }
 
 const emptyStore = {
@@ -75,6 +95,7 @@ const emptyStore = {
   controlAssignments: [],
   onCallAssignments: [],
   onCallConfig: {},
+  schedulingConfig: normalizeSchedulingConfig(),
   staffHourPolicies: []
 };
 
@@ -113,6 +134,7 @@ function normalizeParsedStore(parsed) {
     controlSessions: Array.isArray(parsed.controlSessions) ? parsed.controlSessions : [],
     onCallAssignments: Array.isArray(parsed.onCallAssignments) ? parsed.onCallAssignments : [],
     onCallConfig: normalizeOnCallConfig(parsed.onCallConfig || parsed.on_call_config || {}),
+    schedulingConfig: normalizeSchedulingConfig(parsed.schedulingConfig || {}),
     staffHourPolicies: Array.isArray(parsed.staffHourPolicies) ? parsed.staffHourPolicies : [],
   });
 }
@@ -186,6 +208,7 @@ function normalizeAssignmentMetadata(assignment, options = {}) {
     createdAt,
     updatedAt,
     notes: String(assignment.notes || '').trim(),
+    engagementOverrideReason: String(assignment.engagementOverrideReason ?? assignment.engagement_override_reason ?? '').trim(),
   };
 }
 
@@ -307,9 +330,14 @@ function readStore() {
   }
 }
 
-async function writeStore(data) {
+async function writeStore(data, options = {}) {
   const snapshot = cloneStore(data);
   writeQueue = writeQueue.catch(() => undefined).then(async () => {
+    if (options.expectedVersion !== undefined && options.expectedVersion !== storeVersion) {
+      const error = new Error('Policies, session needs, or assignments changed while scheduling. Run the scheduler again with the latest data.');
+      error.status = 409;
+      throw error;
+    }
     await syncStoreToDb(snapshot);
     persistStoreJson(snapshot);
     storeState = cloneStore(snapshot);
@@ -353,6 +381,7 @@ async function buildStoreFromDb() {
     controlAssignments,
     onCallAssignments,
     onCallConfigRows,
+    schedulingConfigRows,
     staffHourPolicies,
   ] = await Promise.all([
     all(`
@@ -372,7 +401,7 @@ async function buildStoreFromDb() {
       ORDER BY exam_date, start_time, id
     `),
     all(`
-      SELECT id, session_id, staff_id, role, assignment_source, locked, created_at, updated_at, notes
+      SELECT id, session_id, staff_id, role, assignment_source, locked, created_at, updated_at, notes, engagement_override_reason
       FROM assignments
       ORDER BY session_id, staff_id, id
     `),
@@ -392,7 +421,7 @@ async function buildStoreFromDb() {
       ORDER BY control_session_id, staff_id, id
     `),
     all(`
-      SELECT id, exam_date, start_time, end_time, staff_id, role
+      SELECT id, exam_date, start_time, end_time, staff_id, role, engagement_override_reason
       FROM on_call_assignments
       ORDER BY exam_date, start_time, end_time, staff_id, id
     `),
@@ -401,8 +430,9 @@ async function buildStoreFromDb() {
       FROM on_call_config
       ORDER BY config_key
     `),
+    all('SELECT config_key, config_value FROM scheduling_config'),
     all(`
-      SELECT id, staff_id, role, mode, hours_value, exclude_from_auto_schedule, notes
+      SELECT id, staff_id, role, mode, hours_value, exclude_from_auto_schedule, prefer_consecutive_duties, prefer_consecutive_days, allow_engagement_override, notes
       FROM staff_hour_policies
       ORDER BY staff_id, id
     `),
@@ -464,7 +494,10 @@ async function buildStoreFromDb() {
     }
   }
 
+  let schedulingConfig = normalizeSchedulingConfig();
+  try { schedulingConfig = normalizeSchedulingConfig(JSON.parse(schedulingConfigRows.find((row) => row.config_key === 'default')?.config_value || '{}')); } catch (_) { /* Legacy data uses defaults. */ }
   return normalizeParsedStore({
+    schedulingConfig,
     sessions: sessionsNormalized,
     invigilators: invigilatorsNormalized,
     engagements: engagements.map((row) => ({
@@ -483,6 +516,7 @@ async function buildStoreFromDb() {
         invigilatorId: invigilatorIdByStaffId.get(String(row.staff_id)),
         role: String(row.role || '').trim(),
         assignmentSource: String(row.assignment_source || 'legacy').trim() || 'legacy',
+        engagementOverrideReason: String(row.engagement_override_reason || ''),
         locked: Number(row.locked ?? 1) === 1,
         createdAt: String(row.created_at || '').trim(),
         updatedAt: String(row.updated_at || '').trim(),
@@ -513,6 +547,7 @@ async function buildStoreFromDb() {
         endTime: String(row.end_time || '').trim(),
         invigilatorId: invigilatorIdByStaffId.get(String(row.staff_id)),
         role: String(row.role || '').trim() || 'TA',
+        engagementOverrideReason: String(row.engagement_override_reason || ''),
       }))
       .filter((row) => row.date && row.startTime && row.endTime && row.invigilatorId),
     onCallConfig,
@@ -525,6 +560,9 @@ async function buildStoreFromDb() {
         mode: String(row.mode || 'default').trim() || 'default',
         hoursValue: Number(row.hours_value || 0),
         excludeFromAutoSchedule: Number(row.exclude_from_auto_schedule || 0) === 1,
+        preferConsecutiveDuties: Number(row.prefer_consecutive_duties || 0) === 1,
+        preferConsecutiveDays: Number(row.prefer_consecutive_days || 0) === 1,
+        allowEngagementOverride: Number(row.allow_engagement_override ?? 1) === 1,
         notes: String(row.notes || '').trim(),
       }))
       .filter((row) => row.invigilatorId && row.staffId),
@@ -924,6 +962,8 @@ async function syncStoreToDb(store) {
   await writeDb((db) => {
     db.run('DELETE FROM staff_hour_policies');
     db.run('DELETE FROM on_call_config');
+    db.run('DELETE FROM scheduling_config');
+    db.run('INSERT INTO scheduling_config (config_key, config_value) VALUES (?, ?)', ['default', JSON.stringify(normalizeSchedulingConfig(store.schedulingConfig))]);
     db.run('DELETE FROM on_call_assignments');
     db.run('DELETE FROM assignments');
     db.run('DELETE FROM super_assignments');
@@ -999,8 +1039,8 @@ async function syncStoreToDb(store) {
     );
 
     const assignmentStmt = db.prepare(`
-      INSERT INTO assignments (session_id, staff_id, role, assignment_source, locked, created_at, updated_at, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO assignments (session_id, staff_id, role, assignment_source, locked, created_at, updated_at, notes, engagement_override_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const assignment of store.assignments) {
       const sessionDbId = sessionDbIdByAppId.get(String(assignment.sessionId || assignment.session_id || ''));
@@ -1020,7 +1060,8 @@ async function syncStoreToDb(store) {
         normalizedAssignment.locked ? 1 : 0,
         String(normalizedAssignment.createdAt || ''),
         String(normalizedAssignment.updatedAt || ''),
-        String(normalizedAssignment.notes || '')
+        String(normalizedAssignment.notes || ''),
+        String(normalizedAssignment.engagementOverrideReason || '')
       ]);
     }
     assignmentStmt.free();
@@ -1088,8 +1129,8 @@ async function syncStoreToDb(store) {
     controlStmt.free();
 
     const onCallStmt = db.prepare(`
-      INSERT INTO on_call_assignments (exam_date, start_time, end_time, staff_id, role)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO on_call_assignments (exam_date, start_time, end_time, staff_id, role, engagement_override_reason)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     for (const row of store.onCallAssignments || []) {
       onCallStmt.run([
@@ -1103,7 +1144,8 @@ async function syncStoreToDb(store) {
           || row.invigilatorId
           || ''
         ),
-        String(row.role || 'TA')
+        String(row.role || 'TA'),
+        String(row.engagementOverrideReason || '')
       ]);
     }
     onCallStmt.free();
@@ -1119,8 +1161,8 @@ async function syncStoreToDb(store) {
     onCallConfigStmt.free();
 
     const policyStmt = db.prepare(`
-      INSERT INTO staff_hour_policies (staff_id, role, mode, hours_value, exclude_from_auto_schedule, notes)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO staff_hour_policies (staff_id, role, mode, hours_value, exclude_from_auto_schedule, prefer_consecutive_duties, prefer_consecutive_days, allow_engagement_override, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const row of store.staffHourPolicies || []) {
       policyStmt.run([
@@ -1135,6 +1177,9 @@ async function syncStoreToDb(store) {
         String(row.mode || 'default'),
         Number(row.hoursValue || row.hours_value || 0),
         row.excludeFromAutoSchedule ? 1 : 0,
+        row.preferConsecutiveDuties ? 1 : 0,
+        row.preferConsecutiveDays ? 1 : 0,
+        row.allowEngagementOverride === false ? 0 : 1,
         String(row.notes || ''),
       ]);
     }
@@ -1287,7 +1332,7 @@ function buildOnCallNeedsUncached(store) {
 }
 
 function buildOnCallNeeds(store) {
-  return getCachedDerivedView('onCallNeedsCore', () => buildOnCallNeedsUncached(store));
+  return getCachedDerivedView('onCallNeedsCore', () => buildOnCallNeedsUncached(store), 'default', store);
 }
 
 function rangesOverlap(startA, endA, startB, endB) {
@@ -1327,6 +1372,9 @@ function normalizeStaffHourPolicyRow(row, invigilatorMap = new Map()) {
     mode: STAFF_HOUR_POLICY_MODES.has(mode) ? mode : 'default',
     hoursValue: Math.max(0, Number(row.hoursValue ?? row.hours_value ?? 0) || 0),
     excludeFromAutoSchedule: Boolean(row.excludeFromAutoSchedule),
+    preferConsecutiveDuties: ['true', '1', 'yes', 'y'].includes(String(row.preferConsecutiveDuties ?? row.prefer_consecutive_duties ?? false).trim().toLowerCase()),
+    preferConsecutiveDays: ['true', '1', 'yes', 'y'].includes(String(row.preferConsecutiveDays ?? row.prefer_consecutive_days ?? false).trim().toLowerCase()),
+    allowEngagementOverride: ['true', '1', 'yes', 'y'].includes(String(row.allowEngagementOverride ?? row.allow_engagement_override ?? true).trim().toLowerCase()),
     notes: String(row.notes || '').trim(),
   };
 }
@@ -1348,6 +1396,7 @@ function buildStaffHourPolicySummary(store) {
     });
 
     const totalRequiredMinutesByRole = { TA: 0, Doctor: 0 };
+    const onCallRequiredMinutesByRole = { TA: 0, Doctor: 0 };
     (store.sessions || []).forEach((session) => {
       const durationMinutes = getDurationMinutes(session.startTime, session.endTime);
       totalRequiredMinutesByRole.TA += Number(session.taNeeded || 0) * durationMinutes;
@@ -1360,9 +1409,11 @@ function buildStaffHourPolicySummary(store) {
     });
     buildOnCallNeeds(store).forEach((need) => {
       const durationMinutes = Number(need.durationMinutes || getDurationMinutes(need.startTime, need.endTime));
-      totalRequiredMinutesByRole.TA += Number(need.onCallTANeeded || 0) * durationMinutes;
-      totalRequiredMinutesByRole.Doctor += Number(need.onCallDoctorNeeded || 0) * durationMinutes;
+      onCallRequiredMinutesByRole.TA += Number(need.onCallTANeeded || 0) * durationMinutes;
+      onCallRequiredMinutesByRole.Doctor += Number(need.onCallDoctorNeeded || 0) * durationMinutes;
     });
+    totalRequiredMinutesByRole.TA += onCallRequiredMinutesByRole.TA;
+    totalRequiredMinutesByRole.Doctor += onCallRequiredMinutesByRole.Doctor;
 
     const availableStaffByRole = { TA: [], Doctor: [] };
     (store.invigilators || []).forEach((person) => {
@@ -1402,12 +1453,15 @@ function buildStaffHourPolicySummary(store) {
       }
       if (policy?.excludeFromAutoSchedule) {
         excluded = true;
+        allowedMinutes = 0;
       }
 
       const maxMinutes = Number(person.maxHours || 0) > 0 ? Math.round(Number(person.maxHours || 0) * 60) : 0;
+      const hasPolicyLimit = ['exact', 'add', 'reduce'].includes(mode);
+      const hasHardLimit = excluded || hasPolicyLimit || maxMinutes > 0;
       const hardLimitMinutes = excluded
         ? 0
-        : (maxMinutes > 0 ? Math.min(maxMinutes, allowedMinutes || maxMinutes) : allowedMinutes);
+        : (hasPolicyLimit ? (maxMinutes > 0 ? Math.min(maxMinutes, allowedMinutes) : allowedMinutes) : maxMinutes);
 
       const effective = {
         invigilatorId: person.id,
@@ -1421,10 +1475,15 @@ function buildStaffHourPolicySummary(store) {
         allowedHours: Math.round((allowedMinutes / 60) * 100) / 100,
         hardLimitMinutes,
         hardLimitHours: Math.round((hardLimitMinutes / 60) * 100) / 100,
+        hasHardLimit,
+        hasPolicyLimit,
         excluded,
         notes: policy?.notes || '',
         hasCustomPolicy: Boolean(policy),
         excludeFromAutoSchedule: excluded,
+        preferConsecutiveDuties: Boolean(policy?.preferConsecutiveDuties),
+        preferConsecutiveDays: Boolean(policy?.preferConsecutiveDays),
+        allowEngagementOverride: policy?.allowEngagementOverride ?? true,
       };
       effectivePolicyByInvigilatorId.set(person.id, effective);
       effectivePolicyRows.push(effective);
@@ -1437,6 +1496,10 @@ function buildStaffHourPolicySummary(store) {
         Doctor: Math.round((rawAverageMinutesByRole.Doctor / 60) * 100) / 100,
       },
       totalRequiredMinutesByRole,
+      onCallRequiredHoursByRole: {
+        TA: Math.round((onCallRequiredMinutesByRole.TA / 60) * 100) / 100,
+        Doctor: Math.round((onCallRequiredMinutesByRole.Doctor / 60) * 100) / 100,
+      },
       totalRequiredHoursByRole: {
         TA: Math.round((totalRequiredMinutesByRole.TA / 60) * 100) / 100,
         Doctor: Math.round((totalRequiredMinutesByRole.Doctor / 60) * 100) / 100,
@@ -1448,7 +1511,7 @@ function buildStaffHourPolicySummary(store) {
       effectivePolicyByInvigilatorId,
       effectivePolicyRows,
     };
-  });
+  }, 'default', store);
 }
 
 function getStaffHourPolicyCheck(person, currentMinutes, additionalMinutes, context) {
@@ -1475,7 +1538,7 @@ function getStaffHourPolicyCheck(person, currentMinutes, additionalMinutes, cont
   }
 
   const hardLimitMinutes = Number(effective.hardLimitMinutes || 0);
-  if (hardLimitMinutes > 0 && projectedMinutes > hardLimitMinutes) {
+  if (effective.hasHardLimit && projectedMinutes > hardLimitMinutes) {
     return {
       blocked: true,
       reason: 'policy_limit',
@@ -1823,7 +1886,7 @@ function buildSchedulingViewUncached(store) {
 }
 
 function buildSchedulingView(store) {
-  return getCachedDerivedView('schedulingCompactCore', () => buildSchedulingViewUncached(store));
+  return getCachedDerivedView('schedulingCompactCore', () => buildSchedulingViewUncached(store), 'default', store);
 }
 
 function buildSchedulingEligibilityView(store, sessionId) {
@@ -1946,7 +2009,7 @@ function buildOnCallSummary(store) {
       shortage,
       totalShortage: shortage.ta + shortage.doctor,
     };
-  });
+  }, 'default', store);
 }
 
 function buildOnCallEligibilityView(store, date, startTime, endTime) {
@@ -2188,7 +2251,39 @@ function buildDutyCollectionsUncached(store) {
 }
 
 function buildDutyCollections(store) {
-  return getCachedDerivedView('dutyCollectionsCore', () => buildDutyCollectionsUncached(store));
+  return getCachedDerivedView('dutyCollectionsCore', () => buildDutyCollectionsUncached(store), 'default', store);
+}
+
+function buildStaffContinuityView(store) {
+  const summary = buildStaffHourPolicySummary(store);
+  const { sessionDuties, onCallDuties, controlDuties, superDuties } = buildDutyCollections(store);
+  const byStaff = new Map();
+  for (const duty of [...sessionDuties, ...onCallDuties, ...controlDuties, ...superDuties]) {
+    if (!duty.date || !duty.startTime || !duty.endTime) continue;
+    if (!byStaff.has(duty.invigilatorId)) byStaff.set(duty.invigilatorId, new Map());
+    const dates = byStaff.get(duty.invigilatorId);
+    if (!dates.has(duty.date)) dates.set(duty.date, []);
+    dates.get(duty.date).push([parseTimeToMinutes(duty.startTime), parseTimeToMinutes(duty.endTime)]);
+  }
+  return store.invigilators.flatMap((person) => {
+    const policy = summary.effectivePolicyByInvigilatorId.get(person.id);
+    if (!policy?.preferConsecutiveDuties && !policy?.preferConsecutiveDays) return [];
+    const dates = byStaff.get(person.id) || new Map();
+    let idleMinutes = 0;
+    for (const intervals of dates.values()) {
+      intervals.sort((a, b) => a[0] - b[0]);
+      let end = intervals[0][1];
+      for (const [nextStart, nextEnd] of intervals.slice(1)) {
+        idleMinutes += Math.max(0, nextStart - end);
+        end = Math.max(end, nextEnd);
+      }
+    }
+    const days = [...dates.keys()].map((value) => Date.parse(`${value}T00:00:00Z`) / 86400000).sort((a, b) => a - b);
+    const workingDayGaps = days.length ? days[days.length - 1] - days[0] + 1 - days.length : 0;
+    return [{ invigilatorId: person.id, staffId: String(person.staffId || person.id), name: person.name,
+      preferConsecutiveDuties: policy.preferConsecutiveDuties, preferConsecutiveDays: policy.preferConsecutiveDays,
+      workingDayGaps, idleMinutes }];
+  });
 }
 
 function buildWorkloadView(store) {
@@ -2269,6 +2364,8 @@ function buildWorkloadView(store) {
 }
 
 module.exports = {
+  SCHEDULING_PREFERENCES,
+  normalizeSchedulingConfig,
   readStore,
   writeStore,
   initStoreFromPrimary,
@@ -2302,5 +2399,6 @@ module.exports = {
   normalizeOnCallConfig,
   normalizeStaffHourPolicyRow,
   buildDutyCollections,
+  buildStaffContinuityView,
   buildWorkloadView
 };

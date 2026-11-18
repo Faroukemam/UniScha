@@ -84,7 +84,7 @@ function makeControlSession(id, date, startTime, endTime, taNeeded, doctorNeeded
   };
 }
 
-function runPythonSchedule(payload) {
+function runPythonSchedule(payload, expectError = false) {
   const scriptPath = path.join(__dirname, 'auto_schedule.py');
   const result = spawnSync('python', [scriptPath], {
     input: JSON.stringify(payload),
@@ -102,7 +102,7 @@ function runPythonSchedule(payload) {
   if (result.status !== 0 && parsed.status !== 'ERROR') {
     throw new Error(stderr || `auto_schedule.py exited with code ${result.status}`);
   }
-  if (parsed.status === 'ERROR') {
+  if (parsed.status === 'ERROR' && !expectError) {
     throw new Error(parsed.error || 'auto_schedule.py returned ERROR');
   }
   return parsed;
@@ -483,6 +483,7 @@ function run() {
     { id: 'pol_exact', invigilatorId: 'inv_ta_1', staffId: 'TA1', role: 'TA', mode: 'exact', hoursValue: 4, excludeFromAutoSchedule: false, notes: '' },
   ];
   const exactResult = runPythonSchedule(toSolverPayload(exactStore));
+  assert(Number(exactResult.assignedHoursByStaff.TA1 || 0) <= 4, 'Exact policy hours must be a strict limit.');
   result.cases.caseB_exactLimit = {
     staff: 'TA1',
     allowedHours: 4,
@@ -502,10 +503,10 @@ function run() {
     { id: 'pol_exact_soft', invigilatorId: 'inv_ta_1', staffId: 'TA1', role: 'TA', mode: 'exact', hoursValue: 4, excludeFromAutoSchedule: false, notes: '' },
   ];
   const softPolicyResult = runPythonSchedule(toSolverPayload(softPolicyStore));
-  assert((softPolicyResult.assignments || []).length === 2, 'Auto-schedule should still try to cover all sessions when policy is soft.');
-  assert(Number(softPolicyResult.assignedHoursByStaff.TA1 || 0) === 6, 'Soft policy mode should allow policy overflow to cover sessions.');
-  assert((softPolicyResult.overLimitStaff || []).includes('TA1') || (softPolicyResult.policyViolations || []).some((item) => item.staff_id === 'TA1'), 'Soft policy overflow must still be reported in diagnostics.');
-  result.cases.casePolicySoftForCoverage = {
+  assert((softPolicyResult.assignments || []).length === 1, 'Unfillable duties must stay uncovered rather than exceed a custom policy.');
+  assert(Number(softPolicyResult.assignedHoursByStaff.TA1 || 0) <= 4, 'Custom policy hours must never be exceeded.');
+  assert((softPolicyResult.policyViolations || []).length === 0, 'The chosen allocation must honor policy limits.');
+  result.cases.casePolicyLimitBeforeCoverage = {
     assignedHours: Number(softPolicyResult.assignedHoursByStaff.TA1 || 0),
     overLimitStaff: softPolicyResult.overLimitStaff,
     policyViolations: softPolicyResult.policyViolations,
@@ -570,13 +571,12 @@ function run() {
   lockedStore.staffHourPolicies = [
     { id: 'pol_exact', invigilatorId: 'inv_ta_1', staffId: 'TA1', role: 'TA', mode: 'exact', hoursValue: 4, excludeFromAutoSchedule: false, notes: '' },
   ];
-  const lockedResult = runPythonSchedule(toSolverPayload(lockedStore));
-  assert((lockedResult.assignments || []).some((item) => item.staff_id === 'TA1' && item.session_id === 'ses_locked'), 'Locked assignment must be preserved.');
-  assert((lockedResult.overLimitStaff || []).includes('TA1') || (lockedResult.policyViolations || []).some((item) => item.staff_id === 'TA1'), 'Locked over-limit policy must be reported, not silently dropped.');
+  const lockedResult = runPythonSchedule(toSolverPayload(lockedStore), true);
+  assert(lockedResult.status === 'ERROR', 'A conflicting locked duty must block scheduling rather than exceed policy or remove the lock.');
+  assert((lockedResult.details || []).some((item) => item.reason === 'fixed_duties_exceed_policy'), 'The conflicting locked duty must be explained.');
   result.cases.caseF_lockedAssignments = {
-    lockedPreserved: true,
-    overLimitStaff: lockedResult.overLimitStaff,
-    policyViolations: lockedResult.policyViolations,
+    status: lockedResult.status,
+    details: lockedResult.details,
   };
 
   const onCallStore = makeBaseStore();

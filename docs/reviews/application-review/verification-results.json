@@ -1,0 +1,225 @@
+{
+  "summary": {
+    "passed": 34,
+    "failed": 0,
+    "skipped": 2,
+    "liveDataUnchanged": true
+  },
+  "results": [
+    {
+      "script": "verify_assignment_lock_management.js",
+      "status": "PASS",
+      "seconds": 20.346,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_assignment_locking.js",
+      "status": "PASS",
+      "seconds": 12.576,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_assignment_metadata.js",
+      "status": "PASS",
+      "seconds": 12.852,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_auto_schedule_preview.js",
+      "status": "PASS",
+      "seconds": 14.529,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_auto_schedule_preview_export.js",
+      "status": "PASS",
+      "seconds": 16.042,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_auto_schedule_role_scope.js",
+      "status": "PASS",
+      "seconds": 22.148,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_combined_scheduling.js",
+      "status": "PASS",
+      "seconds": 30.99,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_combined_scheduling_ui.cjs",
+      "status": "SKIPPED",
+      "reason": "Requires Playwright and a browser; component rendering is verified separately."
+    },
+    {
+      "script": "verify_committee_assignment_import.js",
+      "status": "PASS",
+      "seconds": 6.621,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_conflict_dashboard.mjs",
+      "status": "PASS",
+      "seconds": 3.098,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_consecutive_preferences.py",
+      "status": "PASS",
+      "seconds": 8.164,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_consecutive_preferences_api.js",
+      "status": "PASS",
+      "seconds": 47.213,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_course_room_assignment.js",
+      "status": "PASS",
+      "seconds": 2.198,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_course_room_assignment.py",
+      "status": "PASS",
+      "seconds": 5.256,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_default_staff_balance.py",
+      "status": "PASS",
+      "seconds": 4.962,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_endpoint_contracts.js",
+      "status": "PASS",
+      "seconds": 23.09,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_engagement_override_report.js",
+      "status": "PASS",
+      "seconds": 3.009,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_engagement_overrides.py",
+      "status": "PASS",
+      "seconds": 8.189,
+      "exitCode": 0,
+      "rerunLog": "verify_engagement_overrides-rerun.log",
+      "note": "Initial one-second stage-diagnostics test timed out under build load; passed with ten-second test budget. Production solver limits unchanged."
+    },
+    {
+      "script": "verify_invigilation_optimizer.py",
+      "status": "PASS",
+      "seconds": 4.892,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_invigilators_import.js",
+      "status": "PASS",
+      "seconds": 7.613,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_on_call.js",
+      "status": "PASS",
+      "seconds": 3.059,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_policy_refresh.js",
+      "status": "PASS",
+      "seconds": 2.082,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_policy_refresh_api.js",
+      "status": "PASS",
+      "seconds": 31.048,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_scheduling_import_export.js",
+      "status": "PASS",
+      "seconds": 8.44,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_scheduling_priorities.py",
+      "status": "PASS",
+      "seconds": 4.966,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_scheduling_ui.cjs",
+      "status": "SKIPPED",
+      "reason": "Requires Playwright and a browser; component rendering is verified separately."
+    },
+    {
+      "script": "verify_session_block_merge.js",
+      "status": "PASS",
+      "seconds": 2.112,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_session_needs_import.js",
+      "status": "PASS",
+      "seconds": 7.684,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_shortage_overrides.py",
+      "status": "PASS",
+      "seconds": 5.096,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_staff_hour_on_call_api.js",
+      "status": "PASS",
+      "seconds": 8.391,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_staff_hour_policy.js",
+      "status": "PASS",
+      "seconds": 29.109,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_staff_hour_policy_drafts.mjs",
+      "status": "PASS",
+      "seconds": 2.154,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_staff_hour_policy_import_export.js",
+      "status": "PASS",
+      "seconds": 4.659,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_staff_schedule.mjs",
+      "status": "PASS",
+      "seconds": 1.841,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_storage_recovery.js",
+      "status": "PASS",
+      "seconds": 1.871,
+      "exitCode": 0
+    },
+    {
+      "script": "verify_ui_render.cjs",
+      "status": "PASS",
+      "scope": "17 initial page renders; no browser interactions"
+    }
+  ]
+}

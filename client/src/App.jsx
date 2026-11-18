@@ -1,9 +1,12 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import SessionsPage from './pages/SessionsPage.jsx';
 import InvigilatorsPage from './pages/InvigilatorsPage.jsx';
 import StaffHourPolicyPage from './pages/StaffHourPolicyPage.jsx';
 import SchedulingPage from './pages/SchedulingPage.jsx';
+import SchedulingRulesPage from './pages/SchedulingRulesPage.jsx';
+import ConflictDashboardPage from './pages/ConflictDashboardPage.jsx';
+import StaffSchedulePage from './pages/StaffSchedulePage.jsx';
 import OnCallPage from './pages/OnCallPage.jsx';
 import SuperInvigilatorsPage from './pages/SuperInvigilatorsPage.jsx';
 import ControlSessionsPage from './pages/ControlSessionsPage.jsx';
@@ -25,9 +28,12 @@ const navItems = [
   { to: '/', label: 'Dashboard', icon: 'dashboard' },
   { to: '/sessions', label: 'Sessions', icon: 'sessions' },
   { to: '/invigilators', label: 'Invigilators', icon: 'staff' },
-  { to: '/staff-hour-policy', label: 'Staff Hour Policy', icon: 'policy' },
+  { to: '/staff-hour-policy', label: 'Staff Hour Policies', icon: 'policy' },
   { to: '/engagements', label: 'Engagements', icon: 'engagements' },
   { to: '/scheduling', label: 'Scheduling', icon: 'schedule' },
+  { to: '/scheduling-rules', label: 'Scheduling Rules', icon: 'policy' },
+  { to: '/conflict-dashboard', label: 'Conflict Dashboard', icon: 'reports' },
+  { to: '/staff-schedule', label: 'Staff Schedule', icon: 'staff' },
   { to: '/on-call', label: 'On-Call', icon: 'phone' },
   { to: '/room-capability', label: 'Room Capability', icon: 'capacity' },
   { to: '/course-room-assignment', label: 'Course Room Assignment', icon: 'rooms' },
@@ -42,9 +48,12 @@ const pageTitles = {
   '/': 'Dashboard',
   '/sessions': 'Sessions',
   '/invigilators': 'Invigilators',
-  '/staff-hour-policy': 'Staff Hour Policy',
+  '/staff-hour-policy': 'Staff Hour Policies',
   '/engagements': 'Engagements',
   '/scheduling': 'Scheduling',
+  '/scheduling-rules': 'Scheduling Rules',
+  '/conflict-dashboard': 'Conflict Dashboard',
+  '/staff-schedule': 'Staff Schedule',
   '/on-call': 'On-Call',
   '/room-capability': 'Room Capability',
   '/course-room-assignment': 'Course Room Assignment',
@@ -62,6 +71,9 @@ const pageDescriptions = {
   '/staff-hour-policy': 'Control total workload targets, limits, and exclusions for each staff member.',
   '/engagements': 'Block unavailable periods before assignment and optimization.',
   '/scheduling': 'Review the assignment grid and run auto-scheduling.',
+  '/scheduling-rules': 'Set scheduling priorities, weighted points, and on-call staffing rules.',
+  '/conflict-dashboard': 'Track conflicts, permitted engagement overrides, coverage gaps, and staff balance.',
+  '/staff-schedule': 'View each staff member’s sessions, on-call, control and super duties in one schedule.',
   '/on-call': 'Manage reserve TA and Doctor coverage by active exam window.',
   '/room-capability': 'Check room capacity, course loads, and session conflicts before assignment.',
   '/course-room-assignment': 'Assign scheduled courses into compatible rooms using OR-Tools.',
@@ -104,10 +116,26 @@ function Layout({ children }) {
   const location = useLocation();
   const title = pageTitles[location.pathname] || 'Exam Staff Scheduler';
   const description = pageDescriptions[location.pathname] || 'Exam scheduling workspace';
-  const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+  const [sidebarHidden, setSidebarHidden] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 768px)');
+    const resize = () => {
+      setIsMobile(media.matches);
+      if (media.matches) setSidebarHidden(true);
+    };
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) setSidebarHidden(true);
+  }, [location.pathname, isMobile]);
 
   return (
     <div className={`app-layout${sidebarHidden ? ' sidebar-hidden' : ''}`}>
+      {isMobile && !sidebarHidden ? <button type="button" className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarHidden(true)} /> : null}
       <aside className="sidebar">
         <div className="sidebar-header">
           <button
@@ -189,10 +217,10 @@ function Toasts({ toasts, dismissToast }) {
 export default function App() {
   const [toasts, setToasts] = useState([]);
 
-  function addToast(message, type = 'info') {
+  const addToast = useCallback((message, type = 'info') => {
     const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setToasts((current) => [...current, { id, message, type }]);
-  }
+  }, []);
 
   function dismissToast(id) {
     setToasts((current) => current.filter((item) => item.id !== id));
@@ -219,6 +247,9 @@ export default function App() {
             <Route path="/staff-hour-policy" element={<StaffHourPolicyPage />} />
             <Route path="/engagements" element={<EngagementsPage />} />
             <Route path="/scheduling" element={<SchedulingPage />} />
+            <Route path="/scheduling-rules" element={<SchedulingRulesPage />} />
+            <Route path="/conflict-dashboard" element={<ConflictDashboardPage />} />
+            <Route path="/staff-schedule" element={<StaffSchedulePage />} />
             <Route path="/on-call" element={<OnCallPage />} />
             <Route path="/room-capability" element={<RoomCapabilityPage />} />
             <Route path="/course-room-assignment" element={<CourseRoomAssignmentPage />} />

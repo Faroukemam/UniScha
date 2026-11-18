@@ -2,11 +2,17 @@
 
 Web-based academic exam scheduling and invigilation platform.
 
+For an explanation of the technology, scheduling rules, optimization, and preview/save process, see [Technology and scheduling guide](TECHNOLOGY_AND_SCHEDULER_GUIDE.md).
+
+For the scoring review and proposed rule extensions, see [Weighted scoring review and constraint plan](WEIGHTED_SCORING_REVIEW_AND_CONSTRAINT_PLAN.md).
+
+For the tab updates, process findings, endpoint inventory, and validation evidence, see [Application UI and process review](APPLICATION_UI_AND_PROCESS_REVIEW.md).
+
 ## Stack
 
 - Frontend: React + Vite
 - Backend: Node.js + Express
-- Local storage: JSON runtime store synced to SQLite
+- Storage: in-memory runtime store persisted to SQLite with JSON mirrors
 - Optimization: Python OR-Tools CP-SAT
 - Excel: import/export with `xlsx`
 

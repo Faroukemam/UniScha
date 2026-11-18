@@ -407,23 +407,35 @@ function buildConflictReport(store, rawFilters) {
 
 function buildStaffReport(store, rawFilters, staffRef) {
   const context = buildReportContext(store, rawFilters);
-  const person = store.invigilators.find((item) => item.id === staffRef || String(item.staffId || '') === staffRef);
+  const person = store.invigilators.find((item) => item.id === staffRef)
+    || store.invigilators.find((item) => String(item.staffId || '') === staffRef);
   if (!person) {
     return { filters: context.filters, person: null, sessions: [], summary: null };
   }
 
+  const sessionById = new Map(store.sessions.map((row) => [row.id, row]));
+  const controlById = new Map(store.controlSessions.map((row) => [row.id, row]));
+  const policy = buildStaffHourPolicySummary(store).effectivePolicyByInvigilatorId.get(person.id) || null;
   const duties = context.filteredDuties
     .filter((duty) => duty.invigilatorId === person.id)
-    .map((duty) => ({
-      date: duty.date,
-      startTime: duty.startTime,
-      endTime: duty.endTime,
-      room: duty.label.includes('(') ? duty.label.split('(').slice(-1)[0].replace(')', '') : '',
-      course: duty.label,
-      role: duty.role || person.role,
-      dutyType: duty.dutyType,
-      durationHours: roundHours(duty.durationMinutes),
-    }))
+    .map((duty) => {
+      const session = duty.dutyType === 'Session' ? sessionById.get(duty.sessionId) : null;
+      const control = duty.dutyType === 'Control' ? controlById.get(duty.controlSessionId) : null;
+      const source = session || control;
+      return {
+        id: duty.id,
+        date: duty.date,
+        startTime: duty.startTime,
+        endTime: duty.endTime,
+        room: source?.room || '',
+        course: duty.label,
+        courseCode: source ? (source.courseNames?.length ? source.courseNames.join('; ') : source.courseName || '') : '',
+        role: duty.role || person.role,
+        dutyType: duty.dutyType,
+        durationHours: roundHours(duty.durationMinutes),
+        durationMinutes: Number(duty.durationMinutes || 0),
+      };
+    })
     .sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
 
   const totalMinutes = context.filteredDuties
@@ -434,6 +446,7 @@ function buildStaffReport(store, rawFilters, staffRef) {
 
   return {
     filters: context.filters,
+    policy,
     person: {
       id: person.id,
       staffId: person.staffId || '',
@@ -700,7 +713,48 @@ function buildReportsSummary(store, rawFilters) {
   };
 }
 
+function buildEngagementOverrideReport(store, rawFilters = {}) {
+  const filters = getFilters(rawFilters);
+  const policies = buildStaffHourPolicySummary(store).effectivePolicyByInvigilatorId;
+  const duties = buildDutyCollections(store);
+  const rows = [];
+  const staff = new Map();
+  for (const duty of [...duties.sessionDuties, ...duties.onCallDuties, ...duties.superDuties, ...duties.controlDuties]) {
+    const person = duty.invigilator;
+    if (!person || !personMatches(person, filters) || !dateMatches(duty.date, filters)) continue;
+    const start = parseTimeToMinutes(duty.startTime), end = parseTimeToMinutes(duty.endTime);
+    const matches = store.engagements.filter((item) => String(item.staffId) === String(person.staffId || person.id)
+      && item.date === duty.date && Number(item.engagement ?? 1) === 1
+      && start < parseTimeToMinutes(item.endTime) && parseTimeToMinutes(item.startTime) < end);
+    if (!matches.length) continue;
+    const intervals = matches.map((item) => [Math.max(start, parseTimeToMinutes(item.startTime)), Math.min(end, parseTimeToMinutes(item.endTime))]).sort((a, b) => a[0] - b[0]);
+    let overlapMinutes = 0, previousEnd = -1;
+    for (const [left, right] of intervals) {
+      overlapMinutes += Math.max(0, right - Math.max(left, previousEnd));
+      previousEnd = Math.max(previousEnd, right);
+    }
+    const permission = policies.get(person.id)?.allowEngagementOverride ?? true;
+    const base = { staffId: person.staffId || person.id, name: person.name, role: person.role, department: person.department || '',
+      dutyType: duty.dutyType, dutyId: duty.id, date: duty.date, startTime: duty.startTime, endTime: duty.endTime,
+      duty: duty.label, assignmentSource: duty.assignmentSource || 'Not recorded', currentlyAllowed: permission ? 'Yes' : 'No',
+      reason: duty.engagementOverrideReason || 'Existing overlap; scheduling reason was not recorded.' };
+    for (const engagement of matches) rows.push({ ...base, engagementId: engagement.id || '', engagementStart: engagement.startTime,
+      engagementEnd: engagement.endTime, engagementNotes: engagement.notes || '',
+      overlapMinutes: Math.min(end, parseTimeToMinutes(engagement.endTime)) - Math.max(start, parseTimeToMinutes(engagement.startTime)) });
+    const total = staff.get(person.id) || { staffId: base.staffId, name: person.name, role: person.role, affectedDuties: 0, overlapMinutes: 0 };
+    total.affectedDuties += 1;
+    total.overlapMinutes += overlapMinutes;
+    staff.set(person.id, total);
+  }
+  rows.sort((a, b) => `${a.date}|${a.startTime}|${a.staffId}`.localeCompare(`${b.date}|${b.startTime}|${b.staffId}`));
+  const staffRows = [...staff.values()].sort((a, b) => b.overlapMinutes - a.overlapMinutes || String(a.staffId).localeCompare(String(b.staffId)));
+  return { filters, rows, staffRows, summary: { affectedStaff: staffRows.length,
+    affectedDuties: staffRows.reduce((sum, row) => sum + row.affectedDuties, 0),
+    overlapMinutes: staffRows.reduce((sum, row) => sum + row.overlapMinutes, 0) } };
+}
+
 module.exports = {
+  buildEngagementOverrideReport,
   buildReportsSummary,
   buildWorkloadReport,
   buildFairnessReport,

@@ -111,6 +111,17 @@ async function run() {
   try {
     await waitForServer(baseUrl);
 
+    const blocked = await fetch(`${baseUrl}/api/scheduling/auto-schedule-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'preserve_all', roleScope: 'both' }),
+    });
+    const blockedDetails = await blocked.json();
+    assert(blocked.status === 400 && (blockedDetails.details || []).some((row) => row.reason === 'locked_staff_excluded'),
+      'Preserving assignments of excluded staff must report the conflict.');
+    // Role-scope preservation is tested with valid fixed duties. Excluded
+    // fixed duties are now explicitly blocked rather than silently retained.
+    await getJson(`${baseUrl}/api/staff-hour-policies`, { method: 'DELETE' });
+
     const storeJsonBefore = fs.readFileSync(storeJsonPath, 'utf8');
     const sqliteBefore = fs.statSync(sqlitePath).size;
     const schedulingBefore = await getJson(`${baseUrl}/api/scheduling`);
@@ -140,6 +151,8 @@ async function run() {
       method: 'POST',
       body: JSON.stringify({ mode: 'rebalance_all', roleScope: 'doctor_only' }),
     });
+    assert(Number(taOnly.averageHoursByRole.Doctor) === Number(both.averageHoursByRole.Doctor), 'TA-only scheduling must retain the full Doctor policy average.');
+    assert(Number(doctorOnly.averageHoursByRole.TA) === Number(both.averageHoursByRole.TA), 'Doctor-only scheduling must retain the full TA policy average.');
 
     assert(Number(taOnly.doctorAssignmentsWouldCreate || 0) === 0, 'ta_only must not create doctor assignments.');
     assert(Number(taOnly.doctorAssignmentsWouldRemove || 0) === 0, 'ta_only must not remove doctor assignments.');
@@ -152,7 +165,7 @@ async function run() {
 
     const exportResult = await getJson(`${baseUrl}/api/scheduling/auto-schedule-preview/export`, {
       method: 'POST',
-      body: JSON.stringify({ mode: 'rebalance_all', roleScope: 'ta_only' }),
+      body: JSON.stringify({ planToken: taOnly.planToken }),
     });
     const workbookPath = resolveWorkbookPath(tempRepoRoot, exportResult.url);
     assert(fs.readFileSync(workbookPath).subarray(0, 2).toString('utf8') === 'PK', 'Role-scope preview export must be a valid XLSX zip.');

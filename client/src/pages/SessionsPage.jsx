@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
+import CollectionToolbar from '../components/CollectionToolbar';
 import * as XLSX from 'xlsx';
 import { api } from '../api';
 import { useToast } from '../App';
+import { readSessionNeedsWorkbook } from '../sessionNeedsWorkbook.mjs';
 
 const emptyForm = {
   courseName: '',
@@ -38,6 +40,10 @@ export default function SessionsPage() {
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState('');
   const showToast = useToast();
+  const [search, setSearch] = useState('');
+  const [dateFilter, setDateFilter] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -77,6 +83,7 @@ export default function SessionsPage() {
   }
 
   function handleEdit(session) {
+    setFormOpen(true);
     setEditingId(session.id);
     setForm({
       courseName: session.courseName || '',
@@ -129,10 +136,15 @@ export default function SessionsPage() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const rows = await readExcelRows(file, ['SessionNeeds']);
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const rows = readSessionNeedsWorkbook(workbook);
       const result = await api.importSessionNeedsRows(rows);
       const missed = result.unmatched?.length ? ` ${result.unmatched.length} unmatched rows.` : '';
-      showToast(`Session needs updated: ${result.updated || 0}.${missed}`, result.unmatched?.length ? 'warning' : 'success');
+      const rejected = result.rejected?.length ? ` ${result.rejected.length} invalid rows.` : '';
+      const firstIssue = result.rejected?.[0] || result.unmatched?.[0];
+      const issueReason = String(firstIssue?.reason || (result.rejected?.length ? 'invalid needs row' : 'session not found')).replace(/_/g, ' ');
+      const detail = firstIssue ? ` First issue: row ${firstIssue.row ?? 'unknown'}, ${issueReason}.` : '';
+      showToast(`Session needs updated: ${result.updated || 0}.${missed}${rejected}${detail}`, firstIssue ? 'warning' : 'success');
       await load();
     } catch (error) {
       showToast(error.message, 'error');
@@ -209,11 +221,22 @@ export default function SessionsPage() {
       { Section: 'Purpose', Instruction: 'Use this template to update TA/Doctor staffing needs for existing or matched sessions.' },
       { Section: 'Matching', Instruction: 'SessionID is preferred. If omitted, matching falls back to Room + Date + Start (+ End/CourseCode when needed).' },
       { Section: 'Columns', Instruction: 'Recommended columns: SessionID, Room, Date, Start, End, TANeeded, DoctorNeeded, InvigilatorsNeeded.' },
+      { Section: 'Needs', Instruction: 'Use non-negative whole numbers for TANeeded and DoctorNeeded. Blank cells preserve existing needs; totals are calculated from the two roles.' },
       { Section: 'DateTime', Instruction: 'Preferred formats: Date = YYYY-MM-DD, Start/End = HH:MM.' },
     ];
-    const rows = [
+    const rows = sessions.length ? sessions.map((session) => ({
+      SessionID: session.id,
+      Room: session.room || '',
+      CourseCode: getSessionCourses(session),
+      Date: session.date || '',
+      Start: session.startTime || '',
+      End: session.endTime || '',
+      TANeeded: session.taNeeded || 0,
+      DoctorNeeded: session.doctorNeeded || 0,
+      InvigilatorsNeeded: (session.taNeeded || 0) + (session.doctorNeeded || 0)
+    })) : [
       {
-        SessionID: 'optional-existing-session-id',
+        SessionID: '',
         Room: '324 R PH',
         Date: '6/1/2026',
         Start: '09:30',
@@ -252,9 +275,11 @@ export default function SessionsPage() {
     }
   }
 
+  const filteredRows = sessions.filter((row) => (!dateFilter || row.date === dateFilter) && `${row.room} ${row.date} ${getSessionCourses(row)} ${row.notes || ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
   return (
-    <div className="page-grid">
-      <section className="panel form-panel">
+    <div className="page-grid rules-page collection-page">
+      <section className="rules-intro"><div><span className="rules-eyebrow">EXAM OPERATIONS</span><h2>Exam sessions</h2><p>Build the exam timetable and set staffing needs.</p></div><button type="button" className="primary-btn" onClick={() => { setEditingId(''); setForm(emptyForm); setFormOpen(true); }}>Add record</button></section>
+      <details className="panel form-panel ops-tools" open={formOpen || Boolean(editingId)} onToggle={(event) => setFormOpen(event.currentTarget.open)}><summary>{editingId ? 'Edit selected record' : 'Add a new record'}</summary>
         <div className="panel-head">
           <h2>Sessions</h2>
           <p>Create exam sessions, then manage TA and doctor needs with the separate needs import.</p>
@@ -303,7 +328,7 @@ export default function SessionsPage() {
             ) : null}
           </div>
         </form>
-      </section>
+      </details>
 
       <section className="panel table-panel">
         <div className="panel-head">
@@ -325,7 +350,8 @@ export default function SessionsPage() {
             <button type="button" className="danger-btn" onClick={removeAll}>Remove All</button>
           </div>
         </div>
-        <div className="table-wrap">
+        <CollectionToolbar search={search} onSearch={setSearch} count={filteredRows.length} date={dateFilter} onDate={setDateFilter} />
+        <div className="table-wrap ops-bounded-table">
           <table>
             <thead>
               <tr>
@@ -339,7 +365,7 @@ export default function SessionsPage() {
               </tr>
             </thead>
             <tbody>
-              {sessions.map((session) => (
+              {filteredRows.map((session) => (
                 <tr key={session.id}>
                   <td>{getSessionCourses(session) || '-'}</td>
                   <td>{session.date}</td>
@@ -353,14 +379,14 @@ export default function SessionsPage() {
                   </td>
                 </tr>
               ))}
-              {loading && !sessions.length ? (
+              {loading && !filteredRows.length ? (
                 <tr>
                   <td colSpan="7" className="empty-cell">Loading sessions...</td>
                 </tr>
               ) : null}
-              {!loading && !sessions.length ? (
+              {!loading && !filteredRows.length ? (
                 <tr>
-                  <td colSpan="7" className="empty-cell">No sessions yet.</td>
+                  <td colSpan="7" className="empty-cell">{sessions.length ? 'No sessions match these filters.' : 'No sessions yet.'}</td>
                 </tr>
               ) : null}
             </tbody>

@@ -291,15 +291,6 @@ function compareSolveResults(a, b) {
   return { better: 'a', reason: 'equal metrics, keep normal-only result', field: 'tie', summaryA, summaryB };
 }
 
-function buildLockedAssignments(roomRows = []) {
-  return roomRows.map((row) => ({
-    placementGroupId: row.placementGroupId,
-    room: row.room,
-    capacityMode: row.capacityMode,
-    students: row.studentsAssignedToThisRoom,
-  }));
-}
-
 async function getCourseRoomAssignmentState() {
   const inputs = await loadInputs();
   const loaded = await loadResults();
@@ -405,7 +396,12 @@ function runPython(payload) {
         return;
       }
       try {
-        resolve(JSON.parse(stdout || '{}'));
+        const result = JSON.parse(stdout || '{}');
+        if (!['OPTIMAL', 'FEASIBLE'].includes(result.status)) {
+          reject(new Error(result.error || `Room assignment did not finish with a usable result (${result.status || 'unknown status'}). Try increasing the solve time.`));
+          return;
+        }
+        resolve(result);
       } catch (error) {
         reject(new Error(stderr || error.message));
       }
@@ -415,7 +411,7 @@ function runPython(payload) {
   });
 }
 
-function buildQualityReport(state, comparison = null) {
+function buildQualityReport(state, comparison = null, options = {}) {
   const report = defaultQuality();
   const backupRows = state.roomRows.filter((row) => row.autoAvailable);
   const roomUsage = new Map();
@@ -464,23 +460,45 @@ function buildQualityReport(state, comparison = null) {
   };
 
   report.shortages = state.results.filter((row) => row.shortage > 0 || row.status === 'Unassigned');
-  report.shortageDiagnostics = report.shortages.map((row) => ({
-    placementGroupId: row.placementGroupId,
-    periodInstance: `${row.date}|${row.start}|${row.end}`,
-    courseCodes: row.courseCodes,
-    roomPlacementType: row.roomPlacementType,
-    totalStudents: row.totalStudents,
-    assignedStudents: Math.max(0, readInt(row.totalStudents) - readInt(row.shortage)),
-    shortage: readInt(row.shortage),
-    date: row.date,
-    start: row.start,
-    end: row.end,
-    candidateRooms: state.capacities.filter((room) => room.roomType === row.roomPlacementType || (row.roomPlacementType === 'TH' && ['TH', 'DH', 'LAB'].includes(room.roomType))).length,
-    totalCompatibleNormalCapacity: 0,
-    compatibleAutoAvailableCapacity: 0,
-    theoreticallyPlaceable: false,
-    shortageReason: row.status === 'Unassigned' ? 'Unassigned' : 'CapacityShortage',
-  }));
+  report.shortageDiagnostics = report.shortages.map((row) => {
+    const candidates = state.capacities.filter((room) => {
+      const compatibleType = room.roomType === row.roomPlacementType
+        || (row.roomPlacementType === 'TH' && (options.allowThFallback ?? true) && ['DH', 'LAB'].includes(room.roomType));
+      if (!compatibleType) return false;
+      if (room.autoAvailable) return options.useAutoAvailableBackup ?? true;
+      return state.availability.some((session) => String(session.room).trim().toLowerCase() === String(room.room).trim().toLowerCase()
+        && session.date === row.date && session.start < session.end
+        && (row.roomPlacementType === 'DH' ? session.start === row.start : session.start <= row.start && session.end >= row.end));
+    });
+    const capacityForGroup = (room) => {
+      const withOverflow = (capacity) => readInt(capacity) + (row.roomPlacementType === 'DH' ? 0 : Math.floor(readInt(capacity) * 0.1 + 1e-9));
+      const major = options.capacityStrategy === 'minor' ? 0 : withOverflow(room.majorCap);
+      const minor = options.capacityStrategy === 'major' ? 0 : withOverflow(room.minorCap);
+      // One group may use one block in each room, never both blocks.
+      return Math.max(major, minor);
+    };
+    const normalCapacity = candidates.filter((room) => !room.autoAvailable).reduce((sum, room) => sum + capacityForGroup(room), 0);
+    const backupCapacity = candidates.filter((room) => room.autoAvailable).reduce((sum, room) => sum + capacityForGroup(room), 0);
+    const coversGroup = normalCapacity + backupCapacity >= readInt(row.totalStudents);
+    return {
+      placementGroupId: row.placementGroupId,
+      periodInstance: `${row.date}|${row.start}|${row.end}`,
+      courseCodes: row.courseCodes,
+      roomPlacementType: row.roomPlacementType,
+      totalStudents: row.totalStudents,
+      assignedStudents: Math.max(0, readInt(row.totalStudents) - readInt(row.shortage)),
+      shortage: readInt(row.shortage),
+      date: row.date,
+      start: row.start,
+      end: row.end,
+      candidateRooms: candidates.filter((room) => capacityForGroup(room) > 0).length,
+      totalCompatibleNormalCapacity: normalCapacity,
+      compatibleAutoAvailableCapacity: backupCapacity,
+      theoreticallyPlaceable: coversGroup,
+      shortageReason: normalCapacity + backupCapacity === 0 ? 'No compatible rooms'
+        : coversGroup ? 'Room competition or packing' : 'One-block capacity limit',
+    };
+  });
 
   const roomBlocks = new Map();
   state.roomRows.forEach((row) => {
@@ -663,7 +681,6 @@ async function runCourseRoomAssignment(options = {}) {
         ...basePayload.options,
         use_auto_available_backup: true,
       },
-      lockedAssignments: buildLockedAssignments(stage1Result.roomRows || []),
     };
     const stage2Result = await runPython(stage2Payload);
     const resultComparison = compareSolveResults(stage1Result, stage2Result);
@@ -681,7 +698,7 @@ async function runCourseRoomAssignment(options = {}) {
 
   await persistSolveResult(finalResult);
   const state = await getCourseRoomAssignmentState();
-  const quality = buildQualityReport(state, comparison);
+  const quality = buildQualityReport(state, comparison, options);
   await setMeta('course_room_quality', quality);
   return state;
 }

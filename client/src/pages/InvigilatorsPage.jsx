@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
+import CollectionToolbar from '../components/CollectionToolbar';
 import * as XLSX from 'xlsx';
 import { api } from '../api';
 import { useToast } from '../App';
+import { readInvigilatorsWorkbook } from '../invigilatorsWorkbook.mjs';
 
 const emptyForm = {
   staffId: '',
@@ -14,17 +16,17 @@ const emptyForm = {
   notes: ''
 };
 
-function getPrimaryImportRows(workbook, preferredSheet = 'Invigilators') {
-  const sheet = workbook.Sheets[preferredSheet]
-    || workbook.Sheets[workbook.SheetNames.find((name) => String(name).trim().toLowerCase() !== 'instructions')];
-  return sheet ? XLSX.utils.sheet_to_json(sheet) : [];
-}
-
 export default function InvigilatorsPage() {
   const [invigilators, setInvigilators] = useState([]);
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importErrors, setImportErrors] = useState([]);
   const showToast = useToast();
+  const [search, setSearch] = useState('');
+  const [dateFilter, setDateFilter] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
 
   async function load() {
     const response = await api.getInvigilators();
@@ -62,6 +64,7 @@ export default function InvigilatorsPage() {
   }
 
   function startEdit(person) {
+    setFormOpen(true);
     setEditingId(person.id);
     setForm({
       name: person.name,
@@ -90,19 +93,25 @@ export default function InvigilatorsPage() {
   }
 
   async function importExcel(event) {
+    const input = event.target;
     const file = event.target.files?.[0];
     if (!file) return;
+    setImporting(true);
+    setImportErrors([]);
     try {
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer, { type: 'array' });
-      const rows = getPrimaryImportRows(workbook);
-      await api.importInvigilatorsRows(rows);
-      showToast('Invigilators imported from Excel.', 'success');
+      const rows = readInvigilatorsWorkbook(workbook);
+      const result = await api.importInvigilatorsRows(rows);
+      showToast(`Staff import: ${result.created || 0} added, ${result.updated || 0} updated, ${result.unchanged || 0} unchanged.`, 'success');
       await load();
     } catch (error) {
+      setImportErrors(error.payload?.errors || []);
       showToast(error.message, 'error');
+    } finally {
+      setImporting(false);
+      input.value = '';
     }
-    event.target.value = '';
   }
 
   function exportExcel() {
@@ -130,6 +139,8 @@ export default function InvigilatorsPage() {
       { Section: 'Columns', Instruction: 'Recommended columns: StaffID, Name, Email, Role, LoadType, MaxHours, Department, Notes.' },
       { Section: 'Role', Instruction: 'Allowed values: TA or Doctor.' },
       { Section: 'LoadType', Instruction: 'Allowed values: full or half.' },
+      { Section: 'Identifiers', Instruction: 'StaffID and Name are required. Each person needs a unique StaffID. Keep identifiers as text to preserve leading zeros.' },
+      { Section: 'Updates', Instruction: 'Import updates matching StaffIDs and adds new staff. Unlisted staff, assignments, availability and hour policies are preserved. If any row is invalid, no rows are saved.' },
     ];
     const rows = [
       {
@@ -172,9 +183,11 @@ export default function InvigilatorsPage() {
     }
   }
 
+  const filteredRows = invigilators.filter((row) => (!roleFilter || row.role === roleFilter) && `${row.name} ${row.staffId} ${row.department || ''} ${row.email || ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
   return (
-    <div className="page-grid">
-      <section className="panel form-panel">
+    <div className="page-grid rules-page collection-page">
+      <section className="rules-intro"><div><span className="rules-eyebrow">EXAM OPERATIONS</span><h2>Invigilator directory</h2><p>Manage staff identity, roles, departments, and maximum hours.</p></div><button type="button" className="primary-btn" onClick={() => { setEditingId(''); setForm(emptyForm); setFormOpen(true); }}>Add record</button></section>
+      <details className="panel form-panel ops-tools" open={formOpen || Boolean(editingId)} onToggle={(event) => setFormOpen(event.currentTarget.open)}><summary>{editingId ? 'Edit selected record' : 'Add a new record'}</summary>
         <div className="panel-head">
           <h2>Invigilators</h2>
           <p>Split staff into TA and Doctor pools for all later scheduling tabs.</p>
@@ -229,7 +242,7 @@ export default function InvigilatorsPage() {
             ) : null}
           </div>
         </form>
-      </section>
+      </details>
 
       <section className="panel split-panel">
         <div className="panel-head">
@@ -238,16 +251,21 @@ export default function InvigilatorsPage() {
             <p>{taList.length} TA, {doctorList.length} Doctor</p>
             <button type="button" className="ghost-btn" onClick={downloadTemplate}>Template</button>
             <label className="ghost-btn">
-              Import Excel
-              <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={importExcel} />
+              {importing ? 'Importing…' : 'Import Excel'}
+              <input type="file" accept=".xlsx,.xls" disabled={importing} style={{ display: 'none' }} onChange={importExcel} />
             </label>
             <button type="button" className="ghost-btn" onClick={exportExcel}>Export Excel</button>
             <button type="button" className="danger-btn" onClick={removeAll}>Remove All</button>
           </div>
         </div>
+        {importErrors.length ? <div role="alert">
+          <p>No staff were imported. Correct these rows in Excel and import again.</p>
+          <div className="table-wrap"><table><thead><tr><th>Excel row</th><th>StaffID</th><th>Reason</th></tr></thead><tbody>{importErrors.map((error, index) => <tr key={index}><td>{error.row}</td><td>{error.staffId || '—'}</td><td>{error.error}</td></tr>)}</tbody></table></div>
+        </div> : null}
+        <CollectionToolbar search={search} onSearch={setSearch} count={filteredRows.length} role={roleFilter} onRole={setRoleFilter} />
         <div className="duo-grid">
-          <StaffTable title="TA Invigilators" rows={taList} onEdit={startEdit} onDelete={remove} />
-          <StaffTable title="Doctor Invigilators" rows={doctorList} onEdit={startEdit} onDelete={remove} />
+          <StaffTable title="TA Invigilators" rows={filteredRows.filter((row) => row.role === 'TA')} onEdit={startEdit} onDelete={remove} />
+          <StaffTable title="Doctor Invigilators" rows={filteredRows.filter((row) => row.role === 'Doctor')} onEdit={startEdit} onDelete={remove} />
         </div>
       </section>
     </div>

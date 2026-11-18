@@ -479,7 +479,7 @@ export default function CourseRoomAssignmentPage() {
         <div className="panel-head">
           <div>
             <h2>Course Room Assignment</h2>
-            <p>Excel-driven course-to-room solver with linked groups, single-mode Major or Minor placement, strict LAB and DH rules, and optional AutoAvailable backup rooms.</p>
+            <p>Assign linked course groups to available rooms using one Major or Minor block per group in each room, with strict LAB and DH rules and optional backup rooms.</p>
           </div>
           <div className="action-row">
             <button type="button" className="primary-btn" onClick={runAssignment} disabled={running || loading}>
@@ -560,7 +560,7 @@ export default function CourseRoomAssignmentPage() {
           <div className="chips-wrap">
             <span className="info-chip">No 10% overflow</span>
             <span className="info-chip">Large groups first</span>
-            <span className="info-chip">No Major / Minor mixing</span>
+            <span className="info-chip">One block per group per room</span>
           </div>
         </div>
         <div className="form-grid">
@@ -588,7 +588,7 @@ export default function CourseRoomAssignmentPage() {
           <label>
             <span>Capacity selection strategy</span>
             <select value={settings.capacityStrategy} onChange={(event) => setSettings((current) => ({ ...current, capacityStrategy: event.target.value }))}>
-              <option value="best">Test Major and Minor and choose best</option>
+              <option value="best">Choose Major or Minor in each room</option>
               <option value="major">Major only</option>
               <option value="minor">Minor only</option>
             </select>
@@ -680,7 +680,7 @@ export default function CourseRoomAssignmentPage() {
                 <th>Candidate Rooms</th>
                 <th>Normal Capacity</th>
                 <th>Backup Capacity</th>
-                <th>Theoretical</th>
+                <th>Capacity before competition</th>
                 <th>Cause</th>
               </tr>
             </thead>
@@ -697,7 +697,7 @@ export default function CourseRoomAssignmentPage() {
                   <td>{row.candidateRooms}</td>
                   <td>{row.totalCompatibleNormalCapacity}</td>
                   <td>{row.compatibleAutoAvailableCapacity}</td>
-                  <td><span className={`report-badge ${row.theoreticallyPlaceable ? 'warning' : 'danger'}`}>{row.theoreticallyPlaceable ? 'Placeable' : 'Not enough'}</span></td>
+                  <td><span className={`report-badge ${row.theoreticallyPlaceable ? 'warning' : 'danger'}`}>{row.theoreticallyPlaceable ? 'Covers group' : 'Below group size'}</span></td>
                   <td>{row.shortageReason}</td>
                 </tr>
               ))}
@@ -718,7 +718,7 @@ export default function CourseRoomAssignmentPage() {
         <div className="panel-head">
           <div>
             <h2>Placement Results</h2>
-            <p>Each placement group is solved in one capacity mode only, with no Major and Minor mixing across rooms.</p>
+            <p>Each placement group uses one capacity block per room. It may use Major in one room and Minor in another.</p>
           </div>
           <div className="chips-wrap">
             <span className="info-chip">{loading ? 'Loading...' : `${state.results.length} groups`}</span>

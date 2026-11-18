@@ -126,6 +126,7 @@ async function run() {
     'UnderTargetStaff',
     'PolicyViolations',
     'SolverDiagnostics',
+    'DefaultStaffBalance',
   ];
 
   const child = spawn(process.execPath, [serverEntry], {
@@ -150,9 +151,12 @@ async function run() {
     const statusBefore = await getJson(`${baseUrl}/api/system/storage-status`);
 
     const runMode = async (mode) => {
+      const preview = await getJson(`${baseUrl}/api/scheduling/auto-schedule-preview`, {
+        method: 'POST', body: JSON.stringify({ mode }),
+      });
       const exportResult = await getJson(`${baseUrl}/api/scheduling/auto-schedule-preview/export`, {
         method: 'POST',
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ planToken: preview.planToken }),
       });
       const workbookPath = resolveWorkbookPath(tempRepoRoot, exportResult.url);
       const signature = fs.readFileSync(workbookPath).subarray(0, 2).toString('utf8');
@@ -160,6 +164,12 @@ async function run() {
       const workbook = XLSX.readFile(workbookPath);
       requiredSheets.forEach((sheet) => {
         assert(workbook.Sheets[sheet], `Missing sheet ${sheet} for mode ${mode}.`);
+      });
+      const balanceRows = XLSX.utils.sheet_to_json(workbook.Sheets.DefaultStaffBalance);
+      assert(balanceRows.length > 0, 'Default staff balance should be exported.');
+      balanceRows.forEach((row) => {
+        assert(Number(row.staffCount) > 0, 'Balance rows must identify their default staff group.');
+        assert(Number(row.maximumHours) >= Number(row.minimumHours), 'Balance ranges must be consistent.');
       });
       return {
         previewMode: mode,

@@ -1,5 +1,8 @@
 const API_BASE = '/api';
 const getCache = new Map();
+const GET_CACHE_TTL_MS = 5000;
+const DATA_CHANGE_KEY = 'scheduler-data-changed';
+let cacheGeneration = 0;
 
 function cloneApiData(value) {
   return typeof structuredClone === 'function'
@@ -8,7 +11,18 @@ function cloneApiData(value) {
 }
 
 function clearApiGetCache() {
+  cacheGeneration += 1;
   getCache.clear();
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('focus', clearApiGetCache);
+  window.addEventListener('storage', (event) => {
+    if (event.key === DATA_CHANGE_KEY) {
+      clearApiGetCache();
+      window.dispatchEvent(new Event('scheduler:data-changed'));
+    }
+  });
 }
 
 function withQuery(path, query = {}) {
@@ -50,12 +64,15 @@ async function apiFetch(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
   const shouldUseAppCache = method === 'GET' && options.skipCache !== true && options.useCache !== false;
   const cacheKey = `${method}:${path}`;
-  if (shouldUseAppCache && getCache.has(cacheKey)) {
-    return cloneApiData(getCache.get(cacheKey));
+  const cached = getCache.get(cacheKey);
+  if (shouldUseAppCache && cached && cached.expiresAt > Date.now()) {
+    return cloneApiData(cached.payload);
   }
+  const requestGeneration = cacheGeneration;
 
   const fetchOptions = sanitizeFetchOptions(options);
   const response = await fetch(`${API_BASE}${path}`, {
+    cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
       ...(fetchOptions.headers || {})
@@ -78,16 +95,24 @@ async function apiFetch(path, options = {}) {
     const fallbackMessage = response.status === 413
       ? 'Import data is too large for the server to accept.'
       : `Request failed (${response.status}${response.statusText ? ` ${response.statusText}` : ''}).`;
-    throw new Error(serverMessage || fallbackMessage);
+    const error = new Error(serverMessage || fallbackMessage);
+    error.payload = payload;
+    throw error;
   }
 
   if (!payload || typeof payload !== 'object') {
     throw new Error('The server returned an invalid response. Please refresh and try again.');
   }
-  if (shouldUseAppCache) {
-    getCache.set(cacheKey, payload);
-  } else if (method !== 'GET') {
+  if (shouldUseAppCache && requestGeneration === cacheGeneration) {
+    getCache.set(cacheKey, { payload, expiresAt: Date.now() + GET_CACHE_TTL_MS });
+  } else if (method !== 'GET' && payload.dryRun !== true) {
     clearApiGetCache();
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(DATA_CHANGE_KEY, `${Date.now()}-${Math.random()}`);
+      } catch (_error) { /* Storage may be disabled; this tab still refreshes. */ }
+      window.dispatchEvent(new Event('scheduler:data-changed'));
+    }
   }
 
   return cloneApiData(payload);
@@ -114,14 +139,18 @@ export const api = {
   deleteEngagement: (id) => apiFetch(`/engagements/${id}`, { method: 'DELETE' }),
   deleteAllEngagements: () => apiFetch('/engagements', { method: 'DELETE' }),
 
-  getStaffHourPolicies: () => apiFetch('/staff-hour-policies'),
+  getStaffHourPolicies: () => apiFetch('/staff-hour-policies', { skipCache: true }),
   saveStaffHourPolicy: (payload) => apiFetch('/staff-hour-policies', { method: 'POST', body: JSON.stringify(payload) }),
   deleteStaffHourPolicy: (id) => apiFetch(`/staff-hour-policies/${id}`, { method: 'DELETE' }),
   deleteAllStaffHourPolicies: () => apiFetch('/staff-hour-policies', { method: 'DELETE' }),
   importStaffHourPoliciesRows: (rows) => apiFetch('/import/staff-hour-policies', { method: 'POST', body: JSON.stringify({ rows }) }),
   exportStaffHourPolicies: () => apiFetch('/export/staff-hour-policies', { skipCache: true }),
+  downloadStaffHourPolicyTemplate: () => apiFetch('/export/staff-hour-policies/template', { skipCache: true }),
 
-  getScheduling: () => apiFetch('/scheduling'),
+  getScheduling: () => apiFetch('/scheduling', { skipCache: true }),
+  getCombinedScheduling: () => apiFetch('/scheduling/combined', { skipCache: true }),
+  previewCombinedScheduling: (mode, roleScope, dutyScope = 'combined', policyMode = 'strict', shortageExcludedInvigilatorIds = []) => apiFetch('/scheduling/combined/preview', { method: 'POST', body: JSON.stringify({ mode, roleScope, dutyScope, policyMode, shortageExcludedInvigilatorIds }) }),
+  applyCombinedScheduling: (planToken) => apiFetch('/scheduling/combined/apply', { method: 'POST', body: JSON.stringify({ planToken }) }),
   getSchedulingEligible: (sessionId) => apiFetch(`/scheduling/session/${encodeURIComponent(sessionId)}/eligible`),
   assignToSession: (payload) => apiFetch('/scheduling/assign', { method: 'POST', body: JSON.stringify(payload) }),
   setSessionAssignmentLock: (id, locked) => apiFetch(`/scheduling/assign/${id}/lock`, { method: 'PATCH', body: JSON.stringify({ locked }) }),
@@ -143,9 +172,11 @@ export const api = {
   removeSessionAssignment: (id) => apiFetch(`/scheduling/assign/${id}`, { method: 'DELETE' }),
   removeAllSessionAssignments: () => apiFetch('/scheduling/assign', { method: 'DELETE' }),
   autoSchedulePreview: (mode = 'preserve_all', roleScope = 'both') => apiFetch('/scheduling/auto-schedule-preview', { method: 'POST', body: JSON.stringify({ mode, roleScope }) }),
-  exportAutoSchedulePreview: (mode = 'preserve_all', roleScope = 'both') => apiFetch('/scheduling/auto-schedule-preview/export', { method: 'POST', body: JSON.stringify({ mode, roleScope }), skipCache: true }),
-  autoSchedule: (mode = 'preserve_manual_only', roleScope = 'both') => apiFetch('/scheduling/auto-schedule', { method: 'POST', body: JSON.stringify({ mode, roleScope }) }),
+  exportAutoSchedulePreview: (planToken) => apiFetch('/scheduling/auto-schedule-preview/export', { method: 'POST', body: JSON.stringify({ planToken }), skipCache: true }),
+  autoSchedule: (planToken) => apiFetch('/scheduling/auto-schedule', { method: 'POST', body: JSON.stringify({ planToken }) }),
 
+  getSchedulingConfig: () => apiFetch('/scheduling/config', { skipCache: true }),
+  saveSchedulingConfig: (payload) => apiFetch('/scheduling/config', { method: 'PATCH', body: JSON.stringify(payload) }),
   getOnCall: () => apiFetch('/on-call'),
   saveOnCallConfig: (payload) => apiFetch('/on-call/config', { method: 'PATCH', body: JSON.stringify(payload) }),
   getOnCallEligible: (date, startTime, endTime) => apiFetch(withQuery('/on-call/eligible', { date, startTime, endTime })),
@@ -171,7 +202,8 @@ export const api = {
   removeAllControlSessions: () => apiFetch('/control-sessions', { method: 'DELETE' }),
   importControlSessionLoadRows: (rows) => apiFetch('/import/control-session-loads', { method: 'POST', body: JSON.stringify({ rows }) }),
 
-  getWorkload: () => apiFetch('/workload'),
+  getWorkload: () => apiFetch('/workload', { skipCache: true }),
+  getStaffSchedule: (id) => apiFetch(`/reports/staff/${encodeURIComponent(id)}`, { skipCache: true }),
   getDayCoverage: () => apiFetch('/day-coverage'),
   exportData: () => apiFetch('/data/export'),
   importData: (data) => apiFetch('/data/import', { method: 'POST', body: JSON.stringify({ data }) }),
@@ -190,6 +222,7 @@ export const api = {
   getReportsFairness: (query) => apiFetch(withQuery('/reports/fairness', query)),
   getReportsDailyCoverage: (query) => apiFetch(withQuery('/reports/daily-coverage', query)),
   getReportsRoomShortage: (query) => apiFetch(withQuery('/reports/room-shortage', query)),
+  getReportsEngagementOverrides: (query) => apiFetch(withQuery('/reports/engagement-overrides', query)),
   getReportsConflicts: (query) => apiFetch(withQuery('/reports/conflicts', query)),
   getReportsDetailedLoad: (query) => apiFetch(withQuery('/reports/detailed-load', query)),
   getReportsStaff: (staffId, query) => apiFetch(withQuery(`/reports/staff/${staffId}`, query)),

@@ -38,13 +38,15 @@ export default function DashboardPage() {
   ];
 
   return (
-    <div className="page-grid">
+    <div className="page-grid rules-page dashboard-page">
+      <section className="rules-intro"><div><span className="rules-eyebrow">EXAM OPERATIONS</span><h2>Your scheduling workspace</h2><p>Start with coverage, review staff policies, then generate and inspect a schedule.</p></div><div className="action-row"><Link className="primary-btn" to="/scheduling">Open scheduling</Link><Link className="ghost-btn" to="/conflict-dashboard">Conflict dashboard</Link></div></section>
       <section className="panel">
         <div className="panel-head">
           <div>
             <h2>Operational Overview</h2>
             <p>Fast view of staffing pressure, daily windows, and coverage gaps.</p>
           </div>
+          <Link className="ghost-btn" to="/conflict-dashboard">Conflict dashboard</Link>
         </div>
         <div className="summary-grid">
           {cards.map((card) => (
@@ -76,10 +78,11 @@ export default function DashboardPage() {
       <section className="panel">
         <div className="panel-head">
           <div>
-            <h2>Room Planning Tools</h2>
+            <h2>Planning and schedule checks</h2>
             <p>Use these before final invigilator scheduling to validate capacity and assign courses to compatible rooms.</p>
           </div>
           <div className="action-row">
+            <Link className="ghost-btn" to="/conflict-dashboard">Conflict Dashboard</Link>
             <Link className="ghost-btn" to="/room-capability">Room Capability</Link>
             <Link className="primary-btn" to="/course-room-assignment">Course Room Assignment</Link>
           </div>

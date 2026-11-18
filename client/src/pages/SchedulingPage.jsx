@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { api, downloadFile } from '../api';
 import { useToast } from '../App';
+import { priorityLabels } from '../components/SchedulingPriorities';
 
 const SLOT_MINUTES = 60;
 const LANE_HEIGHTS = {
@@ -249,6 +251,7 @@ function courseLabel(session) {
 }
 
 function getAutoResultMeta(result) {
+  if (result.combined) return { source: 'Combined planner', summary: result.shortageRemaining ? 'Plan saved with remaining gaps' : 'Session and on-call plan saved', detail: 'Saved exactly as reviewed.', tone: result.shortageRemaining ? 'warning' : 'success' };
   const status = String(result?.status || '').toUpperCase();
   if (!status) {
     return {
@@ -305,6 +308,19 @@ function getAutoResultMeta(result) {
 
 export default function SchedulingPage() {
   const [data, setData] = useState({ sessions: [], taInvigilators: [], doctorInvigilators: [] });
+  const [workspace, setWorkspace] = useState('calendar');
+  const [buildScope, setBuildScope] = useState('combined');
+  const [policyMode, setPolicyMode] = useState('strict');
+  const [shortageExcludedInvigilatorIds, setShortageExcludedInvigilatorIds] = useState([]);
+  const [dutyFilter, setDutyFilter] = useState('all');
+  const [scheduleView, setScheduleView] = useState('list');
+  const [autoLoading, setAutoLoading] = useState(false);
+  const operationRunning = useRef(false);
+  const previewSequence = useRef(0);
+  const loadSequence = useRef(0);
+  const loadedVersion = useRef(null);
+  const [assignmentSaving, setAssignmentSaving] = useState(false);
+  const [importFormat, setImportFormat] = useState('actions');
   const [loading, setLoading] = useState(true);
   const [selection, setSelection] = useState({});
   const [autoResult, setAutoResult] = useState(null);
@@ -345,19 +361,51 @@ export default function SchedulingPage() {
   const [density, setDensity] = useState('comfortable');
   const [roomFilter, setRoomFilter] = useState('');
   const showToast = useToast();
+  const busy = previewLoading || autoLoading || assignmentSaving || assignmentImportLoading || committeeImportLoading || lockActionLoading || lockPlanImportLoading;
+  const shortageChoicesChanged = previewResult?.policyMode === 'cover_shortage' && JSON.stringify([...shortageExcludedInvigilatorIds].sort()) !== JSON.stringify([...(previewResult.shortageExcludedInvigilatorIds || [])].sort());
 
   async function load() {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const response = await api.getScheduling();
-      setData(response);
+      const response = await api.getCombinedScheduling();
+      if (sequence !== loadSequence.current) return;
+      if (loadedVersion.current !== null && response.storeVersion !== undefined && loadedVersion.current !== response.storeVersion) {
+        previewSequence.current += 1;
+        setPreviewResult(null);
+      }
+      loadedVersion.current = response.storeVersion ?? null;
+      const onCallPeriods = (response.onCall?.periods || []).map((period) => ({
+        ...period, id: `__on_call__|${period.periodKey}`, dutyType: 'on_call',
+        courseName: 'On-call reserve', room: 'On-call reserve',
+        taNeeded: period.onCallTANeeded, doctorNeeded: period.onCallDoctorNeeded,
+        taRemaining: period.onCallTARemaining, doctorRemaining: period.onCallDoctorRemaining,
+      }));
+      if (sequence === loadSequence.current) setData({ ...response, sessions: [...response.sessions, ...onCallPeriods] });
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     load().catch((error) => showToast(error.message, 'error'));
+    const refresh = (event) => {
+      if (event.type === 'scheduler:data-changed') {
+        previewSequence.current += 1;
+        setPreviewResult(null);
+      }
+      setEligibleBySession({});
+      setEligibleLoadingBySession({});
+      load().catch((error) => showToast(error.message, 'error'));
+    };
+    window.addEventListener('scheduler:data-changed', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      loadSequence.current += 1;
+      previewSequence.current += 1;
+      window.removeEventListener('scheduler:data-changed', refresh);
+      window.removeEventListener('focus', refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -387,10 +435,11 @@ export default function SchedulingPage() {
 
   const visibleSessions = useMemo(
     () => data.sessions
+      .filter((session) => dutyFilter === 'all' || (session.dutyType === 'on_call' ? dutyFilter === 'on_call' : dutyFilter === 'sessions'))
       .filter((session) => displayedDates.includes(session.date))
       .filter((session) => !roomFilter || String(session.room || '').toLowerCase().includes(roomFilter.toLowerCase()))
       .filter((session) => !onlyOpenNeeds || session.taRemaining > 0 || session.doctorRemaining > 0),
-    [data.sessions, displayedDates, onlyOpenNeeds, roomFilter]
+    [data.sessions, displayedDates, onlyOpenNeeds, roomFilter, dutyFilter]
   );
 
   const availableRooms = useMemo(
@@ -398,7 +447,7 @@ export default function SchedulingPage() {
     [data.sessions]
   );
   const allCurrentAssignmentIds = useMemo(
-    () => [...new Set(data.sessions.flatMap((session) => [...(session.taAssignments || []), ...(session.doctorAssignments || [])].map((assignment) => assignment.id)).filter(Boolean))],
+    () => [...new Set(data.sessions.filter((session) => session.dutyType !== 'on_call').flatMap((session) => [...(session.taAssignments || []), ...(session.doctorAssignments || [])].map((assignment) => assignment.id)).filter(Boolean))],
     [data.sessions]
   );
   const autoAssignmentIds = useMemo(
@@ -410,7 +459,7 @@ export default function SchedulingPage() {
     [data.sessions]
   );
   const assignmentLockStats = useMemo(() => {
-    const assignments = data.sessions.flatMap((session) => [
+    const assignments = data.sessions.filter((session) => session.dutyType !== 'on_call').flatMap((session) => [
       ...(session.taAssignments || []),
       ...(session.doctorAssignments || []),
     ]);
@@ -423,7 +472,7 @@ export default function SchedulingPage() {
   }, [data.sessions]);
   const autoResultMeta = autoResult ? getAutoResultMeta(autoResult) : null;
   const lockFilterMatchCount = useMemo(() => {
-    const assignments = data.sessions.flatMap((session) => [...(session.taAssignments || []), ...(session.doctorAssignments || [])].map((assignment) => ({
+    const assignments = data.sessions.filter((session) => session.dutyType !== 'on_call').flatMap((session) => [...(session.taAssignments || []), ...(session.doctorAssignments || [])].map((assignment) => ({
       ...assignment,
       courseCode: courseLabel(session),
       room: session.room || '',
@@ -447,33 +496,32 @@ export default function SchedulingPage() {
     ta: acc.ta + session.taRemaining,
     doctor: acc.doctor + session.doctorRemaining
   }), { ta: 0, doctor: 0 });
+  const overall = data.sessions.reduce((acc, session) => ({
+    needed: acc.needed + Number(session.taNeeded || 0) + Number(session.doctorNeeded || 0),
+    gaps: acc.gaps + Number(session.taRemaining || 0) + Number(session.doctorRemaining || 0),
+    open: acc.open + (session.taRemaining > 0 || session.doctorRemaining > 0 ? 1 : 0),
+  }), { needed: 0, gaps: 0, open: 0 });
 
   const selectedSession = visibleSessions.find((session) => session.id === selectedSessionId) || null;
   const selectedEligibility = selectedSession ? eligibleBySession[selectedSession.id] || null : null;
   const selectedEligibilityLoading = selectedSession ? Boolean(eligibleLoadingBySession[selectedSession.id]) : false;
   const taManualOptions = useMemo(() => {
-    if (selectedEligibility?.eligibleTAs?.length) {
-      return selectedEligibility.eligibleTAs.map((person) => ({
+    if (selectedEligibility) {
+      return (selectedEligibility.eligibleTAs || []).map((person) => ({
         id: person.id,
         label: `${person.name} (${((Number(person.projectedMinutes || 0)) / 60).toFixed(1)}h after)`,
       }));
     }
-    return (data.taInvigilators || []).map((person) => ({
-      id: person.id,
-      label: `${person.name}${person.staffId ? ` (${person.staffId})` : ''}`,
-    }));
+    return [];
   }, [selectedEligibility, data.taInvigilators]);
   const doctorManualOptions = useMemo(() => {
-    if (selectedEligibility?.eligibleDoctors?.length) {
-      return selectedEligibility.eligibleDoctors.map((person) => ({
+    if (selectedEligibility) {
+      return (selectedEligibility.eligibleDoctors || []).map((person) => ({
         id: person.id,
         label: `${person.name} (${((Number(person.projectedMinutes || 0)) / 60).toFixed(1)}h after)`,
       }));
     }
-    return (data.doctorInvigilators || []).map((person) => ({
-      id: person.id,
-      label: `${person.name}${person.staffId ? ` (${person.staffId})` : ''}`,
-    }));
+    return [];
   }, [selectedEligibility, data.doctorInvigilators]);
   const laneHeight = LANE_HEIGHTS[density] || LANE_HEIGHTS.comfortable;
   const minRowHeight = MIN_ROW_HEIGHTS[density] || MIN_ROW_HEIGHTS.comfortable;
@@ -514,11 +562,13 @@ export default function SchedulingPage() {
 
   useEffect(() => {
     if (!selectedSession) return;
-    if (selectedEligibility || selectedEligibilityLoading) return;
 
     let active = true;
     setEligibleLoadingBySession((current) => ({ ...current, [selectedSession.id]: true }));
-    api.getSchedulingEligible(selectedSession.id)
+    const request = selectedSession.dutyType === 'on_call'
+      ? api.getOnCallEligible(selectedSession.date, selectedSession.startTime, selectedSession.endTime)
+      : api.getSchedulingEligible(selectedSession.id);
+    request
       .then((response) => {
         if (!active) return;
         setEligibleBySession((current) => ({ ...current, [selectedSession.id]: response }));
@@ -535,7 +585,7 @@ export default function SchedulingPage() {
     return () => {
       active = false;
     };
-  }, [selectedSession, selectedEligibility, selectedEligibilityLoading, showToast]);
+  }, [selectedSession, showToast]);
 
   function setSelectValue(sessionId, role, value) {
     setSelection((current) => ({ ...current, [`${sessionId}_${role}`]: value }));
@@ -546,46 +596,73 @@ export default function SchedulingPage() {
   }
 
   async function assign(sessionId, role) {
+    if (operationRunning.current) return;
     const invigilatorId = selection[`${sessionId}_${role}`];
     if (!invigilatorId) {
       showToast(`Choose a ${role} first.`, 'error');
       return;
     }
+    operationRunning.current = true;
+    setAssignmentSaving(true);
     try {
-      await api.assignToSession({ sessionId, invigilatorId });
-      showToast(`${role} assigned to session.`, 'success');
+      let result;
+      if (selectedSession?.dutyType === 'on_call') {
+        result = await api.assignOnCall({ date: selectedSession.date, startTime: selectedSession.startTime, endTime: selectedSession.endTime, invigilatorId });
+      } else result = await api.assignToSession({ sessionId, invigilatorId });
+      showToast(`${role} assigned to session.${result.continuityWarning ? ` ${result.continuityWarning}` : ''}`, 'success');
+      setSelection((current) => ({ ...current, [`${sessionId}_${role}`]: '' }));
       setPreviewResult(null);
       setEligibleBySession({});
       setEligibleLoadingBySession({});
       await load();
     } catch (error) {
       showToast(error.message, 'error');
+    } finally {
+      operationRunning.current = false;
+      setAssignmentSaving(false);
     }
   }
 
   async function autoSchedule() {
+    if (operationRunning.current || !previewResult || shortageChoicesChanged || previewResult.previewMode !== previewMode || previewResult.roleScope !== roleScope) return;
+    operationRunning.current = true;
+    setAutoLoading(true);
     try {
-      const result = await api.autoSchedule(previewMode, roleScope);
+      const result = previewResult.combined
+        ? await api.applyCombinedScheduling(previewResult.planToken)
+        : await api.autoSchedule(previewResult.planToken);
       setAutoResult(result);
       setPreviewResult(null);
       showToast(`Auto-scheduled ${result.placed} duties.`, 'success');
       setEligibleBySession({});
       setEligibleLoadingBySession({});
       await load();
+      setWorkspace('calendar');
     } catch (error) {
       showToast(error.message, 'error');
+    } finally {
+      operationRunning.current = false;
+      setAutoLoading(false);
     }
   }
 
   async function previewAutoSchedule() {
+    if (operationRunning.current) return;
+    operationRunning.current = true;
+    const sequence = ++previewSequence.current;
+    setPreviewResult(null);
     setPreviewLoading(true);
     try {
-      const result = await api.autoSchedulePreview(previewMode, roleScope);
+      const result = buildScope !== 'sessions'
+        ? await api.previewCombinedScheduling(previewMode, roleScope, buildScope, policyMode, policyMode === 'cover_shortage' ? shortageExcludedInvigilatorIds : [])
+        : await api.autoSchedulePreview(previewMode, roleScope);
+      if (sequence !== previewSequence.current) return;
       setPreviewResult(result);
       showToast('Auto-schedule preview completed. No data was saved.', 'success');
     } catch (error) {
       showToast(error.message, 'error');
     } finally {
+      operationRunning.current = false;
       setPreviewLoading(false);
     }
   }
@@ -597,7 +674,22 @@ export default function SchedulingPage() {
     }
     setPreviewExportLoading(true);
     try {
-      const file = await api.exportAutoSchedulePreview(previewResult.previewMode || previewMode, previewResult.roleScope || roleScope);
+      if (previewResult.combined) {
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.duties || []), 'CombinedAssignments');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.staffLoads || []), 'StaffHours');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.continuity || []), 'StaffContinuity');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.defaultStaffBalance || []), 'DefaultStaffBalance');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.optimizationStages || []), 'OptimizationStages');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet((previewResult.preferenceOrder || []).map((priority, index) => ({ rank: index + 1, priority, mode: previewResult.scoringMode, weight: previewResult.preferenceWeights?.[priority] ?? '' }))), 'PreferenceOrder');
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.engagementOverrides || []), 'EngagementOverrides');
+        if (previewResult.policyMode === 'cover_shortage') XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.policyOverrides || []), 'PolicyOverrides');
+        if (previewResult.policyMode === 'cover_shortage') XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(previewResult.shortageExcludedStaff || []), 'ShortageExclusions');
+        XLSX.writeFile(workbook, 'combined_schedule_preview.xlsx');
+        showToast('Reviewed combined plan exported. No assignments were saved.', 'success');
+        return;
+      }
+      const file = await api.exportAutoSchedulePreview(previewResult.planToken);
       downloadFile(file.url, file.fileName || '');
       showToast('Preview export only. No data was saved.', 'success');
     } catch (error) {
@@ -837,7 +929,8 @@ export default function SchedulingPage() {
 
   async function remove(assignmentId) {
     try {
-      await api.removeSessionAssignment(assignmentId);
+      if (selectedSession?.dutyType === 'on_call') await api.removeOnCallAssignment(assignmentId);
+      else await api.removeSessionAssignment(assignmentId);
       showToast('Assignment removed.', 'success');
       setPreviewResult(null);
       setEligibleBySession({});
@@ -903,34 +996,74 @@ export default function SchedulingPage() {
 
   return (
     <div className="schedule-page">
+      <header className="panel schedule-overview">
+        <div className="panel-head">
+          <div><span className="schedule-eyebrow">EXAM OPERATIONS</span><h2>Schedule</h2><p>Find gaps, assign staff, and review changes before saving.</p></div>
+          <div className="action-row">
+            <Link className="ghost-btn" to="/staff-schedule">Staff schedule</Link>
+            <button className="ghost-btn" type="button" onClick={exportCurrentSchedule} disabled={schedulingExportLoading || loading}>Export sessions</button>
+            <button className="primary-btn" type="button" onClick={() => setWorkspace('build')} disabled={busy}>Build schedule</button>
+          </div>
+        </div>
+        <div className="schedule-overview-stats" aria-live="polite">
+          <div><span>Session & reserve periods</span><strong>{loading ? '…' : data.sessions.length}</strong><small>{dates.length} exam days</small></div>
+          <div><span>Assigned duties</span><strong>{loading ? '…' : data.sessions.reduce((sum, session) => sum + session.taAssignments.length + session.doctorAssignments.length, 0)}</strong><small>{assignmentLockStats.locked} session locks</small></div>
+          <div className={overall.gaps ? 'has-gaps' : ''}><span>Unfilled duties</span><strong>{loading ? '…' : overall.gaps}</strong><small>Across {overall.open} sessions</small></div>
+          <div><span>Coverage</span><strong>{loading ? '…' : `${overall.needed ? Math.round(100 * Math.max(0, overall.needed - overall.gaps) / overall.needed) : 0}%`}</strong><small>Of required staffing</small></div>
+        </div>
+        <nav className="schedule-workflow-nav" aria-label="Scheduling views">
+          {[['calendar', 'Schedule', 'Browse & assign'], ['build', 'Build schedule', 'Preview & save'], ['files', 'Excel', 'Import & export'], ['advanced', 'Advanced', 'Locks & backup']].map(([key, label, hint]) => (
+            <button type="button" key={key} aria-current={workspace === key ? 'page' : undefined} onClick={() => setWorkspace(key)} disabled={busy}>
+              <strong>{label}</strong><span>{hint}</span>
+            </button>
+          ))}
+        </nav>
+      </header>
       <div className="panel schedule-toolbar">
+        {workspace === 'build' ? <>
         <div className="panel-head">
           <div>
-            <h2>Scheduling Calendar</h2>
-            <p>Calendar view by actual session time, with manual assignment and OR-Tools auto-scheduling.</p>
+            <span className="schedule-eyebrow">1 · CHOOSE SETTINGS</span>
+            <h2>Build your schedule</h2>
+            <p>Start with session needs, staff availability, and hour policies. Preview the changes before generating a saved schedule.</p>
           </div>
-          <div className="action-row">
-            <select value={previewMode} onChange={(event) => { setPreviewMode(event.target.value); setPreviewResult(null); }} className="schedule-filter-select">
-              <option value="preserve_all">Preserve current assignments</option>
-              <option value="rebalance_all">Rebalance all assignments</option>
-              <option value="preserve_manual_only">Preserve manual locks only</option>
+        </div>
+        <div className="schedule-build-settings">
+          <label className="form-field"><span>Which duties should be planned?</span><select value={buildScope} disabled={busy} onChange={(event) => { setBuildScope(event.target.value); setPreviewResult(null); }}><option value="combined">Sessions + on-call · balanced combined hours</option><option value="sessions">Sessions only · keep on-call fixed</option><option value="on_call">On-call only · keep sessions fixed</option></select></label>
+          <label className="form-field"><span>What should happen to existing assignments?</span>
+            <select value={previewMode} disabled={busy} onChange={(event) => { setPreviewMode(event.target.value); setPreviewResult(null); }}>
+              <option value="preserve_all">Fill gaps · keep every current assignment</option>
+              <option value="preserve_manual_only">Rebuild unlocked assignments · keep locks</option>
+              <option value="rebalance_all">Rebuild everything · replace even locked assignments</option>
             </select>
-            <select value={roleScope} onChange={(event) => { setRoleScope(event.target.value); setPreviewResult(null); }} className="schedule-filter-select">
+          </label>
+          <label className="form-field"><span>Who should be scheduled?</span>
+            <select value={roleScope} disabled={busy} onChange={(event) => { setRoleScope(event.target.value); setPreviewResult(null); }}>
               <option value="both">Both TAs and Doctors</option>
               <option value="ta_only">TAs only</option>
               <option value="doctor_only">Doctors only</option>
             </select>
-            <button type="button" className="ghost-btn" onClick={previewAutoSchedule} disabled={previewLoading}>
-              {previewLoading ? 'Previewing...' : 'Preview Auto-Schedule'}
-            </button>
-            <button type="button" className="primary-btn" onClick={autoSchedule}>Auto Schedule</button>
-            <button type="button" className="ghost-btn" onClick={() => bulkSetAssignmentLock(allCurrentAssignmentIds, true, 'No assignments to lock.')}>Lock All Current</button>
-            <button type="button" className="ghost-btn" onClick={() => bulkSetAssignmentLock(autoAssignmentIds, false, 'No auto assignments to unlock.')}>Unlock Auto Assignments</button>
-            <button type="button" className="danger-btn" onClick={removeAll}>Remove All</button>
-          </div>
+          </label>
         </div>
+        {buildScope !== 'sessions' ? <label className="form-field"><span>Policy rules</span><select aria-label="Policy rules" value={policyMode} disabled={busy} onChange={(event) => { setPolicyMode(event.target.value); setPreviewResult(null); }}><option value="strict">Strict policies (default)</option><option value="cover_shortage">Cover shortages · allow policy overrides</option></select></label> : null}
+        {buildScope !== 'sessions' && policyMode === 'cover_shortage' ? <p className="schedule-guidance is-warning">Optional shortage mode: staff without engagement-override permission or consecutive preferences may override exclusions and custom hour limits to improve coverage. Engagements can be overridden only when the staff checkbox allows it. Exam and other duty conflicts, roles, and explicit maximum hours remain strict. Sessions take priority. Review all exceptions before saving; saved availability and policies stay unchanged.</p> : null}
+        {buildScope === 'combined' ? <p className="schedule-guidance">Priority: fill exam sessions first, then on-call. Balance total workloads, then share exam-session and on-call hours separately among default-policy staff within each role. Custom policies, exclusions and hour limits still apply. Engagements are flexible only when the staff policy allows overrides. “Rebuild unlocked” preserves session locks and every existing on-call choice.</p> : null}
+        {buildScope === 'on_call' ? <p className="schedule-guidance">Session assignments stay fixed. Only on-call duties are planned, using each person’s total workload. Existing on-call choices stay fixed unless you choose Rebuild everything.</p> : null}
+        <p className={`schedule-guidance${previewMode === 'rebalance_all' ? ' is-warning' : ''}`}>
+          {previewMode === 'preserve_all' ? 'Current assignments stay fixed. Choose this to fill remaining gaps. To redistribute hours after changing a policy, choose a rebuild option.' : previewMode === 'preserve_manual_only' ? 'Locked assignments stay fixed. All unlocked assignments can be replaced to balance staffing.' : 'All assignments in the selected role scope can be replaced, including locked assignments.'}
+          {roleScope !== 'both' ? ` ${roleScope === 'ta_only' ? 'Doctor' : 'TA'} assignments stay fixed.` : ''}
+        </p>
+        <p className="muted">Scheduling covers all exam dates and rooms. The date and room filters in Browse sessions only change what you see.</p>
+        <p><a href="/scheduling-rules">Edit scheduling priorities and on-call rules</a>. New previews use the saved settings.</p>
+        <div className="schedule-preparation"><span>Check your inputs:</span><Link to="/sessions">Sessions & needs</Link><Link to="/invigilators">Staff</Link><Link to="/engagements">Availability</Link><Link to="/staff-hour-policy">Hour policies</Link></div>
+        <div className="schedule-preview-action"><div><span className="schedule-eyebrow">2 · REVIEW A PREVIEW</span><p>See expected coverage and staffing changes. Preview does not save assignments.</p></div>
+          <button type="button" className="primary-btn" onClick={previewAutoSchedule} disabled={busy || loading || !overall.needed || !(data.taInvigilators.length + data.doctorInvigilators.length)}>{previewLoading ? 'Calculating preview…' : previewResult ? 'Run preview again' : 'Preview schedule'}</button>
+        </div>
+        {!loading && !overall.needed ? <p className="schedule-guidance is-warning">Add staffing needs in Sessions before building a schedule.</p> : null}
+        </> : null}
+        {workspace === 'calendar' ? <div className="panel-head"><div><h2>Browse sessions</h2><p>Manage session and on-call assignments here. Reserve duties share staff hours and conflict checks with sessions.</p></div><div className="schedule-view-switch" aria-label="Schedule display">{['list', 'calendar'].map((view) => <button type="button" key={view} aria-pressed={scheduleView === view} onClick={() => setScheduleView(view)}>{view === 'list' ? 'Session list' : 'Timeline'}</button>)}</div></div> : null}
         {loading ? <div className="empty-state small">Loading scheduling data...</div> : null}
-        {dates.length ? (
+        {workspace === 'calendar' && dates.length ? (
           <div className="schedule-date-toolbar">
             <div className="schedule-date-summary">
               <strong>Visible Days</strong>
@@ -939,23 +1072,24 @@ export default function SchedulingPage() {
               </span>
             </div>
             <div className="schedule-smart-tools">
-              <select value={focusDate} onChange={(event) => setFocusDate(event.target.value)} className="schedule-filter-select">
+              <select aria-label="Duty type" value={dutyFilter} onChange={(event) => { setDutyFilter(event.target.value); setRoomFilter(''); }} className="schedule-filter-select"><option value="all">Sessions + on-call</option><option value="sessions">Sessions only</option><option value="on_call">On-call only</option></select>
+              <select aria-label="Exam date" value={focusDate} onChange={(event) => setFocusDate(event.target.value)} className="schedule-filter-select">
                 <option value="">Paged view</option>
                 {dates.map((date) => (
                   <option key={date} value={date}>{date}</option>
                 ))}
               </select>
-              <select value={roomFilter} onChange={(event) => setRoomFilter(event.target.value)} className="schedule-filter-select">
+              <select aria-label="Room" value={roomFilter} onChange={(event) => setRoomFilter(event.target.value)} className="schedule-filter-select">
                 <option value="">All rooms</option>
                 {availableRooms.map((room) => (
                   <option key={room} value={room}>{room}</option>
                 ))}
               </select>
-              <select value={density} onChange={(event) => setDensity(event.target.value)} className="schedule-filter-select">
+              {scheduleView === 'calendar' ? <select aria-label="Timeline density" value={density} onChange={(event) => setDensity(event.target.value)} className="schedule-filter-select">
                 <option value="compact">Compact</option>
                 <option value="comfortable">Comfortable</option>
                 <option value="wide">Wide</option>
-              </select>
+              </select> : null}
               <label className="schedule-toggle">
                 <input type="checkbox" checked={onlyOpenNeeds} onChange={(event) => setOnlyOpenNeeds(event.target.checked)} />
                 <span>Only uncovered sessions</span>
@@ -969,24 +1103,15 @@ export default function SchedulingPage() {
             </div>
           </div>
         ) : null}
-        <div className="schedule-kpis">
+        {workspace === 'calendar' ? <div className="schedule-kpis">
           <div className="info-chip"><strong>Visible sessions</strong><span>{visibleSessions.length}</span></div>
           <div className="info-chip"><strong>TA gaps</strong><span>{openSummary.ta}</span></div>
           <div className="info-chip"><strong>Doctor gaps</strong><span>{openSummary.doctor}</span></div>
-          <div className="info-chip"><strong>Locked assignments</strong><span>{assignmentLockStats.locked}</span></div>
-          <div className="info-chip"><strong>Unlocked assignments</strong><span>{assignmentLockStats.unlocked}</span></div>
-          <div className="info-chip"><strong>Role scope</strong><span>{roleScope}</span></div>
           {selectedSession ? (
             <div className="info-chip"><strong>Selected</strong><span>{courseLabel(selectedSession)}</span></div>
           ) : null}
-        </div>
-        <div className="empty-state small" style={{ marginTop: 8 }}>
-          {roleScope === 'ta_only'
-            ? 'TAs only: Doctor assignments stay fixed.'
-            : roleScope === 'doctor_only'
-              ? 'Doctors only: TA assignments stay fixed.'
-              : 'Both: both TAs and Doctors may be scheduled.'}
-        </div>
+        </div> : null}
+        {workspace === 'files' ? <>
         <div className="panel" style={{ marginTop: 12 }}>
           <div className="panel-head">
             <div>
@@ -1004,42 +1129,33 @@ export default function SchedulingPage() {
             <button type="button" className="ghost-btn" onClick={exportCommitteeAssignmentTemplate} disabled={schedulingExportLoading}>
               {schedulingExportLoading ? 'Exporting...' : 'Export Committee Assignment Template'}
             </button>
-            <button type="button" className="ghost-btn" onClick={exportLockPlan} disabled={schedulingExportLoading}>
-              {schedulingExportLoading ? 'Exporting...' : 'Export Lock Plan'}
-            </button>
-            <button type="button" className="ghost-btn" onClick={exportPreviewResult} disabled={previewExportLoading || !previewResult}>
-              {previewExportLoading ? 'Exporting Preview...' : 'Export Preview Result'}
-            </button>
           </div>
         </div>
         <div className="panel" style={{ marginTop: 12 }}>
           <div className="panel-head">
             <div>
               <h3>Scheduling Import</h3>
-              <p>This import affects Scheduling assignments only. It does not modify sessions, invigilators, staff policies, on-call settings, or course-room assignment data.</p>
+              <p>1. Download a template above. 2. Edit it in Excel. 3. Upload, review, then apply. Only session assignments are changed.</p>
             </div>
           </div>
           <div className="action-row">
-            <label className="ghost-btn">
+            <label className="form-field"><span>Workbook format</span><select value={importFormat} disabled={busy} onChange={(event) => setImportFormat(event.target.value)}><option value="actions">Assignment actions · add, remove, lock or unlock</option><option value="committee">Committee assignments · staff by session</option></select></label>
+            {importFormat === 'actions' ? <><label className="ghost-btn">
               {assignmentImportLoading ? 'Validating...' : 'Import Assignment Actions'}
-              <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={importAssignmentActions} />
+              <input type="file" accept=".xlsx,.xls" disabled={busy} style={{ display: 'none' }} onChange={importAssignmentActions} />
             </label>
+            <button type="button" className="ghost-btn" onClick={clearAssignmentImport} disabled={assignmentImportLoading || (!assignmentImportSummary && !pendingAssignmentActionRows.length)}>Clear review</button>
+            </> : <>
             <label className="ghost-btn">
               {committeeImportLoading ? 'Validating Committee...' : 'Import Committee Assignments'}
-              <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={importCommitteeAssignments} />
+              <input type="file" accept=".xlsx,.xls" disabled={busy} style={{ display: 'none' }} onChange={importCommitteeAssignments} />
             </label>
-            <label className="ghost-btn">
-              {lockPlanImportLoading ? 'Importing Lock Plan...' : 'Import Lock Plan'}
-              <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={importLockPlan} />
-            </label>
-            <button type="button" className="ghost-btn" onClick={clearAssignmentImport} disabled={assignmentImportLoading || (!assignmentImportSummary && !pendingAssignmentActionRows.length)}>
-              Clear Import Review
-            </button>
             <button type="button" className="ghost-btn" onClick={clearCommitteeImport} disabled={committeeImportLoading || (!committeeImportSummary && !pendingCommitteeRows.length)}>
-              Clear Committee Review
+              Clear review
             </button>
+            </>}
           </div>
-          <div
+          {importFormat === 'committee' ? <div
             style={{
               display: 'grid',
               gap: 12,
@@ -1049,16 +1165,16 @@ export default function SchedulingPage() {
           >
             <label className="form-field">
               <span>Committee Import Mode</span>
-              <select value={committeeImportMode} onChange={(event) => setCommitteeImportMode(event.target.value)}>
+              <select value={committeeImportMode} disabled={busy} onChange={(event) => { setCommitteeImportMode(event.target.value); clearCommitteeImport(); }}>
                 <option value="append">Append</option>
                 <option value="replace_matching_sessions">Replace Matching Sessions</option>
               </select>
             </label>
-          </div>
+          </div> : null}
           <div className="schedule-run-status-detail" style={{ marginTop: 8 }}>
             This import affects Scheduling assignments only. It does not create sessions or invigilators.
           </div>
-          {assignmentImportSummary ? (
+          {importFormat === 'actions' && assignmentImportSummary ? (
             <div className="panel" style={{ marginTop: 12 }}>
               <div className="chips-wrap">
                 <div className="info-chip"><strong>Rows</strong><span>{assignmentImportSummary.rowsRead}</span></div>
@@ -1106,13 +1222,13 @@ export default function SchedulingPage() {
                   <span>Type IMPORT to apply</span>
                   <input value={assignmentImportConfirmText} onChange={(event) => setAssignmentImportConfirmText(event.target.value)} placeholder="IMPORT" />
                 </label>
-                <button type="button" className="primary-btn" onClick={applyAssignmentImport} disabled={assignmentImportLoading || !assignmentImportSummary.dryRun}>
+                <button type="button" className="primary-btn" onClick={applyAssignmentImport} disabled={assignmentImportLoading || !assignmentImportSummary.dryRun || assignmentImportConfirmText.trim().toUpperCase() !== 'IMPORT'}>
                   {assignmentImportLoading ? 'Applying...' : 'Apply Import'}
                 </button>
               </div>
             </div>
           ) : null}
-          {committeeImportSummary ? (
+          {importFormat === 'committee' && committeeImportSummary ? (
             <div className="panel" style={{ marginTop: 12 }}>
               <div className="chips-wrap">
                 <div className="info-chip"><strong>Rows</strong><span>{committeeImportSummary.rowsRead}</span></div>
@@ -1157,13 +1273,22 @@ export default function SchedulingPage() {
                   <span>Type IMPORT to apply</span>
                   <input value={committeeImportConfirmText} onChange={(event) => setCommitteeImportConfirmText(event.target.value)} placeholder="IMPORT" />
                 </label>
-                <button type="button" className="primary-btn" onClick={applyCommitteeImport} disabled={committeeImportLoading || !committeeImportSummary.dryRun}>
+                <button type="button" className="primary-btn" onClick={applyCommitteeImport} disabled={committeeImportLoading || !committeeImportSummary.dryRun || committeeImportConfirmText.trim().toUpperCase() !== 'IMPORT'}>
                   {committeeImportLoading ? 'Applying...' : 'Apply Committee Import'}
                 </button>
               </div>
             </div>
           ) : null}
         </div>
+        </> : null}
+        {workspace === 'advanced' ? <>
+        <div className="panel-head"><div><h2>Locks & maintenance</h2><p>Lock assignments you want to keep when rebuilding unlocked duties.</p></div></div>
+        <div className="action-row">
+          <button type="button" className="ghost-btn" disabled={busy} onClick={() => bulkSetAssignmentLock(allCurrentAssignmentIds, true, 'No assignments to lock.')}>Lock all current assignments</button>
+          <button type="button" className="ghost-btn" disabled={busy} onClick={() => bulkSetAssignmentLock(autoAssignmentIds, false, 'No auto assignments to unlock.')}>Unlock automatically assigned duties</button>
+        </div>
+        <details className="schedule-disclosure">
+          <summary>Full system backup</summary>
         <div className="panel" style={{ marginTop: 12 }}>
           <div className="panel-head">
             <div>
@@ -1177,6 +1302,7 @@ export default function SchedulingPage() {
             </button>
           </div>
         </div>
+        </details>
         <div className="panel" style={{ marginTop: 12 }}>
           <div className="panel-head">
             <div>
@@ -1270,7 +1396,9 @@ export default function SchedulingPage() {
             </label>
           </div>
         </div>
-        {autoResult ? (
+        <details className="schedule-disclosure schedule-danger-zone"><summary>Remove assignments</summary><p>Remove all saved session assignments. Sessions and staffing needs remain.</p><button type="button" className="danger-btn" disabled={busy} onClick={removeAll}>Remove all session assignments</button></details>
+        </> : null}
+        {(workspace === 'build' || workspace === 'calendar') && autoResult ? (
           <div className={`schedule-run-status tone-${autoResultMeta.tone}`}>
             <div className="schedule-run-status-main">
               <span className={`schedule-status-pill tone-${autoResultMeta.tone}`}>{autoResultMeta.source}</span>
@@ -1291,26 +1419,71 @@ export default function SchedulingPage() {
             ) : null}
           </div>
         ) : null}
-        {previewResult ? (
+        {workspace === 'build' && previewResult ? (
           <div className="schedule-run-status tone-warning" style={{ marginTop: 12 }}>
             <div className="schedule-run-status-main">
               <span className="schedule-status-pill tone-warning">PREVIEW ONLY</span>
-              <strong>{previewResult.selectionReason || 'Auto-schedule preview complete'}</strong>
-              <span>{previewResult.previewMode || previewMode} | {previewResult.roleScope || roleScope} | {previewResult.selectedSolver || 'unknown'} | placed {previewResult.placedDuties} | shortage {previewResult.totalShortage}</span>
+              <strong>Review the expected changes</strong>
             </div>
             <div className="schedule-run-status-detail">{previewResult.note || 'Preview only. No data was saved.'}</div>
+            {previewResult.preferenceOrder?.length ? <details className="schedule-disclosure" open>
+              <summary>Applied scheduling preferences</summary>
+              <p>{previewResult.scoringMode === 'weighted' ? `Weighted points: ${Number(previewResult.preferenceScore || 0).toFixed(2)} penalty points. The order below breaks score ties.` : 'Priority order: higher preferences win conflicts.'}</p>
+              <ol>{previewResult.preferenceOrder.map((key) => <li key={key}>{priorityLabels[key]}{previewResult.scoringMode === 'weighted' ? ` (${previewResult.preferenceWeights?.[key] ?? 0} points)` : ''}</li>)}</ol>
+              {previewResult.preferenceRepair ? <p>{previewResult.preferenceRepair.exchanges} duty exchanges made while preserving every staff member's total, session and on-call hours. Consecutive-day gaps: {previewResult.preferenceRepair.before.consecutive_days} to {previewResult.preferenceRepair.after.consecutive_days}; idle minutes: {previewResult.preferenceRepair.before.consecutive_duties} to {previewResult.preferenceRepair.after.consecutive_duties}.</p> : null}
+            </details> : null}
+            {previewResult.optimizationStages?.length ? <details className="schedule-disclosure">
+              <summary>Scheduling steps ({Number(previewResult.optimizationSeconds || 0).toFixed(1)} seconds)</summary>
+              <p className="muted">Each step keeps the best feasible plan from earlier steps. A time-limited step may retain that plan without improving it.</p>
+              <div className="table-wrap"><table><thead><tr><th>Step</th><th>Status</th><th>Elapsed seconds</th></tr></thead><tbody>{previewResult.optimizationStages.map((row) => <tr key={row.stage}><td>{row.stage.replaceAll('_', ' ')}</td><td>{row.status}</td><td>{row.elapsedSeconds}</td></tr>)}</tbody></table></div>
+            </details> : null}
+            {previewResult.engagementOverrides?.length ? <details className="schedule-disclosure" open>
+              <summary>Engagement overrides ({previewResult.engagementOverrides.length})</summary>
+              <p className="muted">Allowed by the staff policy to fill shortages or balance workload. Engagement records are retained; other policies and duty conflicts still apply.</p>
+              <div className="table-wrap"><table><thead><tr><th>Staff ID</th><th>Duty</th><th>Date</th><th>Time</th><th>Engagement overlap (minutes)</th><th>Reason</th></tr></thead><tbody>{previewResult.engagementOverrides.map((row, index) => <tr key={index}><td>{row.staffId}</td><td>{row.dutyType === 'on_call' ? 'On-call' : 'Session'}</td><td>{row.date}</td><td>{row.startTime} - {row.endTime}</td><td>{row.overlapMinutes}</td><td>{row.reason}</td></tr>)}</tbody></table></div>
+            </details> : null}
+            {previewResult.defaultStaffBalance?.length ? <details className="schedule-disclosure" open>
+              <summary>Default staff: session and on-call balance</summary>
+              <p className="muted">Compared within each role. Existing locks, availability and hour limits can leave differences. Exam coverage takes priority over on-call coverage.</p>
+              <div className="table-wrap"><table><thead><tr><th>Role</th><th>Duty</th><th>Default staff</th><th>Average H</th><th>Minimum H</th><th>Maximum H</th><th>Spread H</th></tr></thead><tbody>{previewResult.defaultStaffBalance.map((row) => <tr key={`${row.role}-${row.dutyType}`}><td>{row.role}</td><td>{row.dutyType === 'on_call' ? 'On-call' : 'Sessions'}</td><td>{row.staffCount}</td><td>{Number(row.averageHours).toFixed(2)}</td><td>{Number(row.minimumHours).toFixed(2)}</td><td>{Number(row.maximumHours).toFixed(2)}</td><td>{Number(row.spreadHours).toFixed(2)}</td></tr>)}</tbody></table></div>
+            </details> : null}
+            {previewResult.continuity?.length ? <details className="schedule-disclosure" open>
+              <summary>Consecutive duties and working days</summary>
+              {previewResult.continuity.some((row) => (row.preferConsecutiveDays && row.workingDayGaps > 0) || (row.preferConsecutiveDuties && row.idleMinutes > 0)) ? <div className="schedule-guidance is-warning" role="status">
+                <strong>Some consecutive preferences remain unmet.</strong>{' '}
+                {previewResult.scoringMode === 'weighted' ? 'The saved points weights determine which preferences win.' : 'Preferences higher in the saved order can take priority over closing these gaps.'}{' '}
+                Coverage, workload balance, and hard staff policies remain protected.{' '}
+                <Link to="/scheduling-rules">Review scheduling priorities</Link> before generating another preview.
+              </div> : null}
+              {previewResult.preferenceRepair?.timeLimited ? <p className="schedule-guidance is-warning">The duty-exchange search reached its time limit. Further improvements may exist; the gaps shown are not proven unavoidable.</p> : null}
+              <p className="muted">Preferences respect other staff policies and duty conflicts. Engagements are flexible only when the staff policy allows overrides. Coverage and balanced total and on-call workloads take priority; extra reserve duties are not assigned just to close gaps. Days off counts calendar days between the first and last working date; idle minutes counts gaps within working days across all duty types.</p>
+              <div className="table-wrap"><table><thead><tr><th>Staff ID</th><th>Consecutive duties</th><th>Consecutive days</th><th>Days off between dates</th><th>Idle minutes</th></tr></thead><tbody>{previewResult.continuity.map((row) => <tr key={row.staffId}><td>{row.staffId}</td><td>{row.preferConsecutiveDuties ? 'Preferred' : 'Off'}</td><td>{row.preferConsecutiveDays ? 'Preferred' : 'Off'}</td><td>{row.workingDayGaps}</td><td>{row.idleMinutes}</td></tr>)}</tbody></table></div>
+            </details> : null}
+            {previewResult.policyMode === 'cover_shortage' ? <details className="schedule-disclosure" open><summary>Review shortage staff · keep or exclude</summary><p className="muted">Review the proposed staff below. Keep accepts their proposed assignments; Exclude prevents new assignments for that person when you recalculate. Existing assignments stay fixed according to your rebuild setting. These choices apply only to this plan.</p><div className="table-wrap schedule-combined-loads"><table><thead><tr><th>Staff</th><th>Role</th><th>New duties</th><th>Exceptions</th><th>Your choice</th></tr></thead><tbody>{(previewResult.shortageStaff || []).map((person) => <tr key={person.id}><td>{person.name} <small>{person.staffId}</small></td><td>{person.role}</td><td>{person.newDuties}</td><td>{person.overrides}</td><td><select aria-label={`Shortage choice for ${person.name}`} disabled={busy} value={shortageExcludedInvigilatorIds.includes(person.id) ? 'exclude' : 'keep'} onChange={(event) => { const exclude = event.target.value === 'exclude'; setShortageExcludedInvigilatorIds((ids) => exclude ? [...new Set([...ids, person.id])] : ids.filter((id) => id !== person.id)); }}><option value="keep">Keep</option><option value="exclude">Exclude</option></select></td></tr>)}</tbody></table></div>{!(previewResult.shortageStaff || []).length ? <p>No new shortage assignments were proposed.</p> : null}{shortageChoicesChanged ? <p className="schedule-guidance is-warning">Staff choices changed. Recalculate shortage filling to review replacements and remaining gaps before saving.</p> : null}<button type="button" className="primary-btn" disabled={busy || !shortageChoicesChanged} onClick={previewAutoSchedule}>Recalculate shortage filling</button></details> : null}
             {previewResult.roleScopedNote ? (
               <div className="schedule-run-status-detail">{previewResult.roleScopedNote}</div>
             ) : null}
-            <div className="schedule-run-status-detail">Preview export only. No data is saved.</div>
+            {previewResult.policyMode === 'cover_shortage' ? <details className="schedule-disclosure" open><summary>Policy overrides ({previewResult.policyOverrides?.length || 0})</summary><p className="muted">These exceptions are included in this reviewed plan. Existing assignments may also appear. Policies and availability records are not edited.</p>{previewResult.policyOverrides?.length ? <div className="table-wrap schedule-combined-loads"><table><thead><tr><th>Staff</th><th>Duty</th><th>Date / time</th><th>Rule overridden</th><th>Details</th></tr></thead><tbody>{previewResult.policyOverrides.map((item, index) => <tr key={index}><td>{item.Name} <small>{item.StaffID}</small></td><td>{item.DutyType || 'Total hours'}</td><td>{item.Date ? `${item.Date} ${item.Start}–${item.End}` : 'All dates'}</td><td>{item.Rule}</td><td>{item.Detail}</td></tr>)}</tbody></table></div> : <p>No policy overrides are needed for this plan.</p>}</details> : null}
+            {previewResult.shortageExcludedStaff?.length ? <p className="schedule-guidance">Excluded from new shortage assignments: {previewResult.shortageExcludedStaff.map((person) => `${person.Name} (${person.StaffID})`).join(', ')}.</p> : null}
+            <div className="schedule-preview-summary">
+              <div><span>Unfilled duties</span><strong>{previewResult.currentTotalShortage ?? overall.gaps} → {previewResult.previewTotalShortage ?? previewResult.totalShortage ?? 0}</strong></div>
+              <div><span>Assignments to add</span><strong>{previewResult.assignmentsWouldCreate ?? 0}</strong></div>
+              <div><span>Assignments to remove</span><strong>{previewResult.assignmentsWouldRemove ?? 0}</strong></div>
+              <div><span>Assignments to keep</span><strong>{previewResult.assignmentsWouldKeep ?? 0}</strong></div>
+            </div>
+            {previewResult.combined ? <>
+              <div className="chips-wrap"><div className="info-chip"><strong>Session gaps</strong><span>{previewResult.sessionShortage}</span></div><div className="info-chip"><strong>On-call gaps</strong><span>{previewResult.onCallShortage}</span></div></div>
+              <details className="schedule-disclosure" open><summary>Combined hours by staff</summary><p className="muted">Session and on-call hours are balanced together. Other duties also consume each person’s hour limit.</p><div className="table-wrap schedule-combined-loads"><table><thead><tr><th>Staff</th><th>Role</th><th>Current H</th><th>Session H</th><th>On-call H</th><th>Other H</th><th>Planned total H</th><th>Target H</th></tr></thead><tbody>{(previewResult.staffLoads || []).map((person) => <tr key={person.staffId}><td>{person.name} <small>{person.staffId}</small></td><td>{person.role}</td><td>{Number(person.currentHours).toFixed(2)}</td><td>{Number(person.sessionHours).toFixed(2)}</td><td>{Number(person.onCallHours).toFixed(2)}</td><td>{Number(person.otherHours).toFixed(2)}</td><td>{Number(person.totalHours).toFixed(2)}</td><td>{Number(person.targetHours).toFixed(2)}</td></tr>)}</tbody></table></div></details>
+            </> : null}
             <div className="action-row" style={{ marginTop: 8 }}>
-              <button type="button" className="ghost-btn" onClick={exportPreviewResult} disabled={previewExportLoading}>
-                {previewExportLoading ? 'Exporting Preview...' : 'Export Preview Result'}
+              <button type="button" className="ghost-btn" onClick={exportPreviewResult} disabled={previewExportLoading || shortageChoicesChanged}>
+                {previewExportLoading ? 'Exporting Preview...' : previewResult.combined ? 'Export reviewed plan' : 'Export fresh preview'}
               </button>
             </div>
             {previewResult.assignmentModeSupport && !previewResult.assignmentModeSupport.supportsPreserveManualOnly ? (
               <div className="schedule-run-status-detail">{previewResult.assignmentModeSupport.reason}</div>
             ) : null}
+            {!previewResult.combined ? <details className="schedule-disclosure"><summary>Staff-hour comparison & scheduling details</summary>
             <div className="chips-wrap" style={{ marginTop: 12 }}>
               <div className="info-chip"><strong>Selected Solver</strong><span>{previewResult.selectedSolver || '-'}</span></div>
               <div className="info-chip"><strong>Role Scope</strong><span>{previewResult.roleScope || 'both'}</span></div>
@@ -1475,11 +1648,15 @@ export default function SchedulingPage() {
                 ) : <div className="empty-state small">No staff would gain hours.</div>}
               </div>
             </div>
+            </details> : null}
+            <div className="schedule-preview-action"><div><span className="schedule-eyebrow">{previewResult.combined ? '3. SAVE REVIEWED PLAN' : '3. GENERATE & SAVE'}</span><p>{previewResult.combined ? 'Save the exact session and on-call plan shown above. If data changes or the preview expires, run preview again.' : 'This runs scheduling again using these settings and saves the result. Placements can differ from the preview. Exporting a fresh preview also runs the calculation again.'}</p></div>
+              <button type="button" className="primary-btn" onClick={autoSchedule} disabled={busy || !previewResult || shortageChoicesChanged || previewResult.previewMode !== previewMode || previewResult.roleScope !== roleScope}>{autoLoading ? 'Saving…' : 'Save reviewed plan'}</button>
+            </div>
           </div>
         ) : null}
       </div>
 
-      {!dates.length ? (
+      {workspace === 'calendar' ? (!dates.length ? (
         <div className="panel empty-state">No sessions available yet. Import or create sessions first.</div>
       ) : (
         <div
@@ -1489,7 +1666,22 @@ export default function SchedulingPage() {
             '--schedule-column-count': `${timeColumnCount}`
           }}
         >
-          <div className="schedule-calendar-shell">
+          {scheduleView === 'list' ? (
+            <div className="panel schedule-session-list">
+              <div className="table-wrap"><table>
+                <thead><tr><th>Date & time</th><th>Room</th><th>Courses</th><th>TA</th><th>Doctor</th><th>Status</th><th /></tr></thead>
+                <tbody>{[...visibleSessions].sort((a, b) => `${a.date} ${a.startTime} ${a.room}`.localeCompare(`${b.date} ${b.startTime} ${b.room}`)).map((session) => (
+                  <tr key={session.id} className={selectedSessionId === session.id ? 'is-selected' : ''}>
+                    <td><strong>{formatDateLabel(session.date)}</strong><small>{session.startTime}–{session.endTime}</small></td><td>{session.room || '—'}</td><td>{courseLabel(session)}</td>
+                    <td>{session.taAssignments.length}/{session.taNeeded}</td><td>{session.doctorAssignments.length}/{session.doctorNeeded}</td>
+                    <td><span className={`schedule-status-pill tone-${session.taRemaining + session.doctorRemaining > 0 ? 'warning' : 'success'}`}>{session.taRemaining + session.doctorRemaining > 0 ? `${session.taRemaining + session.doctorRemaining} unfilled` : 'Covered'}</span></td>
+                    <td><button type="button" className="ghost-btn" aria-label={`Manage ${session.room} on ${session.date} at ${session.startTime}`} aria-expanded={selectedSessionId === session.id} onClick={() => toggleSessionSelection(session.id)}>{selectedSessionId === session.id ? 'Close' : 'Manage'}</button></td>
+                  </tr>
+                ))}</tbody>
+              </table></div>
+              {!visibleSessions.length ? <div className="empty-state">No sessions match these filters. Try another date or room, or turn off the uncovered filter.</div> : null}
+            </div>
+          ) : <div className="schedule-calendar-shell">
             <div className="schedule-calendar-header">
               <div className="schedule-date-header-cell">Date</div>
               {timeMarks.slice(0, -1).map((mark) => (
@@ -1541,6 +1733,11 @@ export default function SchedulingPage() {
                             className={`calendar-session-card calendar-session-card-horizontal ${coverageState}${session.id === selectedSessionId ? ' is-selected' : ''}`}
                             style={{ left: `${leftPercent}%`, width: `${widthPercent}%`, top: `${top}px` }}
                             onClick={() => toggleSessionSelection(session.id)}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Manage ${session.room} on ${session.date} at ${session.startTime}`}
+                            aria-expanded={session.id === selectedSessionId}
+                            onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleSessionSelection(session.id); } }}
                           >
                             <div className="calendar-session-topline">
                               <span className={`calendar-session-status${session.id === selectedSessionId ? ' active' : ''}`}>
@@ -1563,7 +1760,7 @@ export default function SchedulingPage() {
                 );
               })}
             </div>
-          </div>
+          </div>}
 
           {selectedSession ? (
             <aside className="panel schedule-detail-panel schedule-detail-sidebar">
@@ -1583,15 +1780,16 @@ export default function SchedulingPage() {
                   <div className="info-chip"><strong>TA left</strong><span>{selectedSession.taRemaining}</span></div>
                   <div className="info-chip"><strong>Doctor left</strong><span>{selectedSession.doctorRemaining}</span></div>
                   <div className="info-chip"><strong>Duration</strong><span>{(Number(selectedSession.durationMinutes || 0) / 60).toFixed(1)}h</span></div>
-                  <div className="info-chip"><strong>Eligible TA</strong><span>{selectedSession.eligibleTACount ?? (selectedEligibility?.eligibleTAs.length || 0)}</span></div>
-                  <div className="info-chip"><strong>Eligible Doctor</strong><span>{selectedSession.eligibleDoctorCount ?? (selectedEligibility?.eligibleDoctors.length || 0)}</span></div>
+                <div className="info-chip"><strong>Eligible TA</strong><span>{selectedSession.eligibleTACount ?? (selectedEligibility?.eligibleTAs?.length || 0)}</span></div>
+                  <div className="info-chip"><strong>Eligible Doctor</strong><span>{selectedSession.eligibleDoctorCount ?? (selectedEligibility?.eligibleDoctors?.length || 0)}</span></div>
                 </div>
-                {selectedEligibilityLoading ? <p className="muted">Loading eligible candidates. You can still choose from the current TA/Doctor lists while backend validation runs on assign.</p> : null}
+                <button type="button" className="ghost-btn" onClick={() => setSelectedSessionId('')}>Close session</button>
+                {selectedEligibilityLoading ? <p className="muted" role="status">Checking staff availability and hour policies…</p> : null}
                 {!selectedEligibilityLoading && !selectedEligibility ? (
-                  <p className="muted">Eligible candidates could not be loaded yet. You can still choose from the full role list and the backend will validate conflicts and policy rules.</p>
+                  <p className="muted">Candidates could not be loaded. <button type="button" className="ghost-btn" onClick={() => load().catch((error) => showToast(error.message, 'error'))}>Retry</button></p>
                 ) : null}
                 {!selectedEligibilityLoading && selectedEligibility && !selectedEligibility.eligibleTAs?.length && !selectedEligibility.eligibleDoctors?.length ? (
-                  <p className="muted">No eligible candidates were returned for this session. You can still try the full role list if you need backend validation against current data.</p>
+                  <p className="muted">No eligible staff are available. Check availability, hour policies, and conflicting assignments.</p>
                 ) : null}
 
                 <div className="schedule-detail-sections">
@@ -1606,7 +1804,7 @@ export default function SchedulingPage() {
                           </option>
                         ))}
                       </select>
-                      <button type="button" className="btn btn-primary" onClick={() => assign(selectedSession.id, 'TA')}>Assign TA</button>
+                      <button type="button" className="btn btn-primary" disabled={assignmentSaving || selectedEligibilityLoading || !taManualOptions.some((person) => person.id === selection[`${selectedSession.id}_TA`]) || selectedSession.taRemaining <= 0} onClick={() => assign(selectedSession.id, 'TA')}>Assign TA</button>
                     </div>
                     <div className="calendar-assignment-list">
                       {selectedSession.taAssignments.map((assignment) => (
@@ -1615,9 +1813,9 @@ export default function SchedulingPage() {
                             {assignment.invigilator?.name || 'Unknown'} (TA)
                             <small className="muted"> [{assignment.assignmentSource || 'legacy'} / {assignment.locked ? 'locked' : 'unlocked'}]</small>
                           </span>
-                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAssignmentLock(assignment.id, !assignment.locked)}>
+                          {selectedSession.dutyType !== 'on_call' ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAssignmentLock(assignment.id, !assignment.locked)}>
                             {assignment.locked ? 'Unlock' : 'Lock'}
-                          </button>
+                          </button> : null}
                           <button type="button" className="btn btn-ghost btn-sm" onClick={() => remove(assignment.id)}>Remove</button>
                         </div>
                       ))}
@@ -1636,7 +1834,7 @@ export default function SchedulingPage() {
                           </option>
                         ))}
                       </select>
-                      <button type="button" className="btn btn-primary" onClick={() => assign(selectedSession.id, 'Doctor')}>Assign Doctor</button>
+                      <button type="button" className="btn btn-primary" disabled={assignmentSaving || selectedEligibilityLoading || !doctorManualOptions.some((person) => person.id === selection[`${selectedSession.id}_Doctor`]) || selectedSession.doctorRemaining <= 0} onClick={() => assign(selectedSession.id, 'Doctor')}>Assign Doctor</button>
                     </div>
                     <div className="calendar-assignment-list">
                       {selectedSession.doctorAssignments.map((assignment) => (
@@ -1645,9 +1843,9 @@ export default function SchedulingPage() {
                             {assignment.invigilator?.name || 'Unknown'} (Doctor)
                             <small className="muted"> [{assignment.assignmentSource || 'legacy'} / {assignment.locked ? 'locked' : 'unlocked'}]</small>
                           </span>
-                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAssignmentLock(assignment.id, !assignment.locked)}>
+                          {selectedSession.dutyType !== 'on_call' ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAssignmentLock(assignment.id, !assignment.locked)}>
                             {assignment.locked ? 'Unlock' : 'Lock'}
-                          </button>
+                          </button> : null}
                           <button type="button" className="btn btn-ghost btn-sm" onClick={() => remove(assignment.id)}>Remove</button>
                         </div>
                       ))}
@@ -1659,7 +1857,7 @@ export default function SchedulingPage() {
             </aside>
           ) : null}
         </div>
-      )}
+      )) : null}
     </div>
   );
 }

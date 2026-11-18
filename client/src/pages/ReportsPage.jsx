@@ -21,6 +21,7 @@ const emptyReports = {
   onCall: { periods: [], assignments: [], config: {} },
   detailedLoad: { summary: {}, rows: [] },
   conflicts: { rows: [] },
+  engagementOverrides: { rows: [], staffRows: [], summary: {} },
   sessionCoverage: { rows: [] },
   utilization: { rows: [] },
   quality: { breakdown: {} },
@@ -36,6 +37,7 @@ const initialSectionLoading = {
   onCall: true,
   detailedLoad: true,
   conflicts: true,
+  engagementOverrides: true,
   sessionCoverage: true,
   utilization: true,
   quality: true,
@@ -103,6 +105,7 @@ export default function ReportsPage() {
         onCall: true,
         detailedLoad: true,
         conflicts: true,
+        engagementOverrides: true,
         sessionCoverage: true,
         utilization: true,
         quality: true,
@@ -136,6 +139,7 @@ export default function ReportsPage() {
         ['onCall', () => api.getOnCall()],
         ['detailedLoad', () => api.getReportsDetailedLoad(filters)],
         ['conflicts', () => api.getReportsConflicts(filters)],
+        ['engagementOverrides', () => api.getReportsEngagementOverrides(filters)],
         ['sessionCoverage', () => api.getReportsSessionCoverage(filters)],
         ['utilization', () => api.getReportsUtilization(filters)],
         ['quality', () => api.getReportsQualityScore(filters)],
@@ -238,6 +242,8 @@ export default function ReportsPage() {
       { name: 'DailyCoverage', rows: reports.dailyCoverage.rows },
       { name: 'RoomShortage', rows: reports.roomShortage.rows },
       { name: 'Conflicts', rows: reports.conflicts.rows },
+      { name: 'EngagementOverrides', rows: reports.engagementOverrides.rows },
+      { name: 'AffectedStaff', rows: reports.engagementOverrides.staffRows },
       { name: 'SessionCoverage', rows: reports.sessionCoverage.rows },
       { name: 'Utilization', rows: reports.utilization.rows },
         { name: 'Quality', rows: [reports.quality.breakdown] },
@@ -356,7 +362,8 @@ export default function ReportsPage() {
   ];
 
   return (
-    <div className="page-grid">
+    <div className="page-grid rules-page reports-page">
+      <nav className="report-section-nav" aria-label="Report sections"><a href="#report-detail">Detailed Load</a><a href="#report-workload">Workload</a><a href="#report-fairness">Fairness</a><a href="#report-coverage">Daily Coverage</a><a href="#report-conflicts">Conflict</a><a href="#report-engagements">Engagement Overrides</a><a href="#report-staff">Staff Individual</a><a href="#report-export">Export Center</a></nav>
       <section className="panel">
         <div className="panel-head">
           <div>
@@ -410,7 +417,7 @@ export default function ReportsPage() {
         </div>
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-export">
         <div className="panel-head">
           <div>
             <h2>Export Center</h2>
@@ -440,6 +447,7 @@ export default function ReportsPage() {
               </button>
               <button type="button" className="ghost-btn" onClick={() => exportReportExcel('daily_coverage_report', reports.dailyCoverage.rows)}>Daily Coverage</button>
               <button type="button" className="ghost-btn" onClick={() => exportReportExcel('conflict_report', reports.conflicts.rows)}>Conflicts</button>
+              <button type="button" className="ghost-btn" onClick={() => exportReportExcel('engagement_overrides', reports.engagementOverrides.rows)}>Engagement Overrides</button>
               <button type="button" className="ghost-btn" onClick={() => exportReportExcel('session_coverage_report', reports.sessionCoverage.rows)}>Session Coverage</button>
               <button type="button" className="ghost-btn" onClick={() => exportReportExcel('utilization_report', reports.utilization.rows)}>Utilization</button>
               {reports.staffReport?.person ? (
@@ -479,7 +487,7 @@ export default function ReportsPage() {
         {sectionErrors.summary ? <div className="empty-state">Summary failed to load: {sectionErrors.summary}</div> : null}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-detail">
         <div className="panel-head">
           <div>
             <h2>Detailed Load Report</h2>
@@ -535,7 +543,7 @@ export default function ReportsPage() {
         {sectionErrors.detailedLoad ? <div className="empty-state">Detailed load failed to load: {sectionErrors.detailedLoad}</div> : null}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-workload">
         <div className="panel-head">
           <div>
             <h2>Workload Report</h2>
@@ -611,7 +619,7 @@ export default function ReportsPage() {
         {sectionErrors.workload ? <div className="empty-state">Workload failed to load: {sectionErrors.workload}</div> : null}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-fairness">
         <div className="panel-head">
           <div>
             <h2>Fairness Report</h2>
@@ -650,7 +658,7 @@ export default function ReportsPage() {
         {sectionErrors.fairness ? <div className="empty-state">Fairness failed to load: {sectionErrors.fairness}</div> : null}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-coverage">
         <div className="panel-head">
           <div>
             <h2>Daily Coverage Report</h2>
@@ -759,7 +767,7 @@ export default function ReportsPage() {
         {sectionErrors.roomShortage ? <div className="empty-state">Room shortage failed to load: {sectionErrors.roomShortage}</div> : null}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-conflicts">
         <div className="panel-head">
           <div>
             <h2>Conflict Report</h2>
@@ -802,7 +810,23 @@ export default function ReportsPage() {
         {sectionErrors.conflicts ? <div className="empty-state">Conflicts failed to load: {sectionErrors.conflicts}</div> : null}
       </section>
 
-      <section className="panel">
+      <section className="panel" id="report-engagements">
+        <div className="section-heading"><div><h2>Engagement Overrides</h2><p>Staff assigned during recorded engagements in the saved schedule. Includes existing and manual duties; the source and current permission are shown when available. Totals count overlapping engagement minutes once per duty.</p></div>{renderSectionStatus('engagementOverrides')}</div>
+        <div className="action-row">
+          <span className="info-chip">Affected staff: {reports.engagementOverrides.summary.affectedStaff || 0}</span>
+          <span className="info-chip">Affected duties: {reports.engagementOverrides.summary.affectedDuties || 0}</span>
+          <span className="info-chip">Overlap minutes: {reports.engagementOverrides.summary.overlapMinutes || 0}</span>
+          <button type="button" className="ghost-btn" onClick={() => downloadWorkbook('engagement_overrides.xlsx', [{ name: 'AffectedStaff', rows: reports.engagementOverrides.staffRows }, { name: 'EngagementOverrides', rows: reports.engagementOverrides.rows }])}>Export Excel</button>
+          <button type="button" className="ghost-btn" onClick={() => exportReportCsv('engagement_overrides', reports.engagementOverrides.rows)}>Export CSV</button>
+        </div>
+        <div className="table-wrap"><table><thead><tr><th>Staff ID</th><th>Name</th><th>Role</th><th>Duty</th><th>Date / time</th><th>Engagement</th><th>Engagement notes</th><th>Overlap min</th><th>Reason</th><th>Source</th><th>Currently allowed</th></tr></thead><tbody>
+          {reports.engagementOverrides.rows.map((row, index) => <tr key={`${row.dutyId}-${row.engagementId}-${index}`}><td>{row.staffId}</td><td>{row.name}</td><td>{row.role}</td><td>{row.dutyType}: {row.duty}</td><td>{row.date} {row.startTime} - {row.endTime}</td><td>{row.engagementStart} - {row.engagementEnd}</td><td>{row.engagementNotes}</td><td>{row.overlapMinutes}</td><td>{row.reason}</td><td>{row.assignmentSource}</td><td>{row.currentlyAllowed}</td></tr>)}
+          {!reports.engagementOverrides.rows.length ? <tr><td colSpan="11" className="empty-cell">{sectionLoading.engagementOverrides ? 'Loading engagement overrides...' : 'No engagement overrides for the current filters.'}</td></tr> : null}
+        </tbody></table></div>
+        {sectionErrors.engagementOverrides ? <div className="empty-state">Engagement overrides failed to load: {sectionErrors.engagementOverrides}</div> : null}
+      </section>
+
+      <section className="panel" id="report-staff">
         <div className="panel-head">
           <div>
             <h2>Staff Individual Report</h2>

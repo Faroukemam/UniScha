@@ -56,6 +56,7 @@ def convert_result(result):
 
     return {
         "status": result.get("status", "FEASIBLE"),
+        "error": result.get("error"),
         "objective": result.get("summary", {}).get("totalWasteCapacity", 0),
         "assignments": assignments,
         "unassigned": result.get("unassigned", []),

@@ -143,6 +143,11 @@ async function initDb() {
           config_value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS scheduling_config (
+          config_key TEXT PRIMARY KEY,
+          config_value TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS staff_hour_policies (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           staff_id TEXT NOT NULL UNIQUE,
@@ -150,6 +155,9 @@ async function initDb() {
           mode TEXT NOT NULL DEFAULT 'default',
           hours_value REAL DEFAULT 0,
           exclude_from_auto_schedule INTEGER NOT NULL DEFAULT 0,
+          prefer_consecutive_duties INTEGER NOT NULL DEFAULT 0,
+          prefer_consecutive_days INTEGER NOT NULL DEFAULT 0,
+          allow_engagement_override INTEGER NOT NULL DEFAULT 1,
           notes TEXT DEFAULT ''
         );
 
@@ -261,6 +269,8 @@ async function initDb() {
       ensureColumn(db, 'assignments', 'created_at', "created_at TEXT DEFAULT ''");
       ensureColumn(db, 'assignments', 'updated_at', "updated_at TEXT DEFAULT ''");
       ensureColumn(db, 'assignments', 'notes', "notes TEXT DEFAULT ''");
+      ensureColumn(db, 'assignments', 'engagement_override_reason', "engagement_override_reason TEXT NOT NULL DEFAULT ''");
+      ensureColumn(db, 'on_call_assignments', 'engagement_override_reason', "engagement_override_reason TEXT NOT NULL DEFAULT ''");
       ensureColumn(db, 'control_sessions', 'course_name', "course_name TEXT DEFAULT ''");
       ensureColumn(db, 'control_sessions', 'room', "room TEXT DEFAULT ''");
       ensureColumn(db, 'control_sessions', 'ta_needed', 'ta_needed INTEGER DEFAULT 0');
@@ -269,6 +279,9 @@ async function initDb() {
       ensureColumn(db, 'control_sessions', 'notes', "notes TEXT DEFAULT ''");
       ensureColumn(db, 'staff_hour_policies', 'hours_value', 'hours_value REAL DEFAULT 0');
       ensureColumn(db, 'staff_hour_policies', 'exclude_from_auto_schedule', 'exclude_from_auto_schedule INTEGER NOT NULL DEFAULT 0');
+      ensureColumn(db, 'staff_hour_policies', 'prefer_consecutive_duties', 'prefer_consecutive_duties INTEGER NOT NULL DEFAULT 0');
+      ensureColumn(db, 'staff_hour_policies', 'prefer_consecutive_days', 'prefer_consecutive_days INTEGER NOT NULL DEFAULT 0');
+      ensureColumn(db, 'staff_hour_policies', 'allow_engagement_override', 'allow_engagement_override INTEGER NOT NULL DEFAULT 1');
       ensureColumn(db, 'staff_hour_policies', 'notes', "notes TEXT DEFAULT ''");
 
       persistDb(db);

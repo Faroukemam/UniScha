@@ -190,7 +190,11 @@ Eligibility is calculated in:
 
 Auto scheduling uses:
 
-- `POST /api/scheduling/auto-schedule`
+- `POST /api/scheduling/auto-schedule-preview` to solve session-only scheduling
+- `POST /api/scheduling/auto-schedule` with the returned `planToken` to save that exact plan
+- `POST /api/scheduling/auto-schedule-preview/export` with the same `planToken` to export that exact preview
+
+Session-only previews expire after ten minutes or when scheduling data changes. Saving and exporting require a valid token and never rerun the solver. A successfully saved token cannot be reused. Edits made while a preview is being calculated cause it to be rejected. Combined session/on-call plans use the same preview-and-apply workflow through `/api/scheduling/combined/preview` and `/api/scheduling/combined/apply`.
 
 The backend builds a solver payload from:
 
@@ -233,11 +237,29 @@ Hard constraints:
 
 Objective priorities:
 
-1. minimize staffing shortage
-2. reduce max individual load
-3. reduce load spread
-4. reduce same-role imbalance
-5. reduce excess sessions per day above soft limit
+1. minimize exam staffing shortage, then on-call shortage
+2. minimize explicitly permitted policy and availability overrides
+3. balance total workloads and reduce duties above the daily soft limit
+4. balance exam-session and on-call hours separately among default-policy staff within each role, without worsening total workload balance
+5. refine on-call distribution across the remaining eligible staff
+6. minimize calendar-day gaps and then idle minutes without worsening earlier workload objectives
+
+Staff with no custom hour policy and staff explicitly using mode `default` join the same default balancing group. TAs and Doctors have separate groups. Exact/add/reduce/exclude policies retain their own rules and are not equalized with default staff. Both exam and reserve hours include preserved assignments. Equal combined hours alone are insufficient: the default duty balance objective also reduces differences in each duty type, even when both consecutive-duty preferences are off. Default balancing is a preference, so availability, hard limits, locks and exam coverage can leave differences. Preview and export data include `defaultStaffBalance`; the preview workbook's `DefaultStaffBalance` sheet shows staff count, average, minimum, maximum and spread by role and duty type.
+
+The daily soft limit defaults to two modeled duties per staff member per date, including locked duties and on-call duties in combined plans. `daily_penalty_weight` controls the penalty in the CP-SAT quality objective and the fallback's candidate ranking; zero disables the penalty. Coverage remains the first priority, so duties above the limit are permitted when needed. Results expose `dailyExcessDuties` and `dailyPenalty` for diagnostics.
+
+### Staff continuity preferences
+
+The Staff Hour Policy editor has two independent checkboxes, both off by default:
+
+- `preferConsecutiveDuties`: prefer a single block of duties per working date, minimizing idle minutes between the first and last duty.
+- `preferConsecutiveDays`: prefer consecutive calendar dates, minimizing days without duties between the first and last working date. Weekends and dates with no available sessions still count as gaps; the scheduler never creates duties to fill them.
+
+Session, on-call, control and super duties contribute to the same continuity calculation. Fixed and locked duties count, and additional duties can bridge gaps between them. Preferences are soft: required coverage comes first. Exclusions, custom hour-policy limits, maximum hours and duty overlaps remain protected for staff with either continuity preference or engagement-override permission. Engagements can be overridden only through the separate Allow engagement override checkbox, which defaults on. Turning it off keeps engagements strict even in shortage mode.
+
+Both CP-SAT and fallback scheduling use these preferences after workload balance. Continuity rearranges a fair allocation; it must not attract extra on-call duties just to fill gaps. CP-SAT fixes the best workload score found, then refines the default staff duty mix, on-call distribution and continuity without worsening earlier objectives. Fallback ranks projected workload and existing hours of the same duty type before continuity, and result selection compares workload quality and default duty balance before gaps. Coverage remains first when only a few staff can cover a duty. The dedicated on-call auto-assignment API always uses the same solver, including when all continuity preferences are off; exam assignments stay fixed in this on-call-only operation. Session and combined previews include per-staff `continuity` rows, and preview workbooks include `StaffContinuity`. Existing gaps appear as policy warnings; manual assignment can create a gap and returns a warning rather than rejecting a valid assignment.
+
+The flags are saved in JSON, SQLite and backups. Excel policy templates and exports use `PreferConsecutiveDuties` and `PreferConsecutiveDays`, accepting Yes/No, True/False or 1/0. Missing or blank columns default to No. Existing SQLite databases migrate automatically with both flags off.
 
 ### Layer 2: Greedy fallback
 
@@ -353,3 +375,21 @@ Use this checklist after imports or solver changes:
 - SQLite is synchronized but not yet the primary Scheduling query source.
 - The fallback scheduler is greedy, so it is a safety layer, not a fairness-optimized replacement for CP-SAT.
 - The sample loader still depends on the structure of files in `sample/`; it is not a general import substitute.
+
+
+### Engagement override permission and report
+
+Staff Hour Policies includes **Allow engagement override**, on by default for both existing and new staff. Turn it off for staff whose engagements must remain strict, including in shortage mode. When enabled, automatic exam and on-call scheduling may use engagement time to cover shortages or balance workload. This permission keeps all other policies strict: custom hour caps, maximum hours, staff/on-call exclusions, roles, fixed duties and simultaneous duty conflicts. Consecutive preferences can be used alongside the permission. Imported availability is retained.
+
+Preview lists every overridden duty, overlap minutes, and its reason. Reasons distinguish exam coverage, on-call coverage, workload allocation, and preserved fixed/locked assignments. Coverage reasons mean there is no engagement-free direct replacement in the resulting plan under the remaining policies; they are not a proof that every possible rearrangement needs that override. Workload reasons mean a direct replacement exists, but the solver selected that workload allocation.
+
+After saving, **Reports > Engagement Overrides** shows the affected staff, duties, engagement times and notes, overlap minutes, recorded reason, assignment source when available, and current permission. Filters apply by date, role, department and staff. Export the report as Excel (affected-staff summary and detailed overlaps) or CSV; it is also included in the full reports workbook. Totals merge overlapping engagement intervals within each duty. Older overlaps without recorded reasons are labeled accordingly. Reasons survive SQLite recovery and JSON backups/imports.
+
+
+### Optimizer timing and running backend
+
+The optimizer now starts its budget before model preparation, reserves 35% for coverage and warm-start setup, and assigns explicit deadlines to the remaining workload, default-duty mix, on-call, engagement-reduction and continuity steps. Hints reuse the original variable wrappers and solution values. Greedy conflict checks scan only that staff member's duty intervals, rather than every assignment in the plan. These changes reduce preparation overhead and reserve opportunities for later objectives. OR-Tools can return after its requested cutoff, so this remains a solve budget rather than a hard HTTP timeout.
+
+Preview and Excel export expose `optimizationStages` with status and elapsed seconds, plus `optimizationSeconds`. A FEASIBLE result is an incumbent, not a proof of optimum; UNKNOWN or SKIPPED_TIME_LIMIT stages retain the last feasible plan. Fallback selection retains the CP-SAT stage diagnostics even when the greedy plan wins.
+
+After backend code changes, restart the backend process. Refresh the browser and generate a new preview: a previously displayed preview cannot acquire new policy flags or solver behavior automatically. Saving still requires the exact reviewed plan token; no corrected preview is saved automatically.

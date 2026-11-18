@@ -285,9 +285,12 @@ async function run() {
     const exportLockPlan = await getJson(`${baseUrl}/api/scheduling/assign/lock-plan/export`);
     validateWorkbookFile(tempRepoRoot, exportLockPlan.url, ['AssignmentLockPlan']);
 
-    const previewExport = await getJson(`${baseUrl}/api/scheduling/auto-schedule-preview/export`, {
+    const sessionPreview = await getJson(`${baseUrl}/api/scheduling/auto-schedule-preview`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'preserve_all', roleScope: 'both' }),
+    });
+    const previewExport = await getJson(`${baseUrl}/api/scheduling/auto-schedule-preview/export`, {
+      method: 'POST', body: JSON.stringify({ planToken: sessionPreview.planToken }),
     });
     validateWorkbookFile(tempRepoRoot, previewExport.url, ['PreviewSummary', 'CurrentAssignments', 'PreviewAssignments', 'SolverDiagnostics']);
 

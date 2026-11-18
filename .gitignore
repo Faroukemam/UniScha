@@ -10,6 +10,10 @@ client/dist/
 server/data/
 server/temp/
 
+# Local review snapshots and scheduler payloads
+artifacts/
+tmp_sched_payload.json
+
 # Local editor and environment files
 .vscode/
 .env

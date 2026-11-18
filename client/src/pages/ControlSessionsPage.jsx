@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import CollectionToolbar from '../components/CollectionToolbar';
 import * as XLSX from 'xlsx';
 import { api, downloadFile } from '../api';
 import { useToast } from '../App';
@@ -26,6 +27,10 @@ export default function ControlSessionsPage() {
   const [editingId, setEditingId] = useState('');
   const [selection, setSelection] = useState({});
   const showToast = useToast();
+  const [search, setSearch] = useState('');
+  const [dateFilter, setDateFilter] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
 
   async function load() {
     const response = await api.getControlSessions();
@@ -60,6 +65,7 @@ export default function ControlSessionsPage() {
   }
 
   function startEdit(session) {
+    setFormOpen(true);
     setEditingId(session.id);
     setForm({
       courseName: session.courseName || 'Control Session',
@@ -172,9 +178,11 @@ export default function ControlSessionsPage() {
   const taInvigilators = data.invigilators.filter((item) => item.role === 'TA');
   const doctorInvigilators = data.invigilators.filter((item) => item.role === 'Doctor');
 
+  const filteredRows = data.sessions.filter((row) => (!dateFilter || row.date === dateFilter) && `${row.room} ${row.date} ${row.courseName} ${row.notes || ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
   return (
-    <div className="page-grid">
-      <section className="panel form-panel">
+    <div className="page-grid rules-page collection-page">
+      <section className="rules-intro"><div><span className="rules-eyebrow">EXAM OPERATIONS</span><h2>Control sessions</h2><p>Create control-room duties and review their staffing.</p></div><button type="button" className="primary-btn" onClick={() => { setEditingId(''); setForm(emptyForm); setFormOpen(true); }}>Add record</button></section>
+      <details className="panel form-panel ops-tools" open={formOpen || Boolean(editingId)} onToggle={(event) => setFormOpen(event.currentTarget.open)}><summary>{editingId ? 'Edit selected record' : 'Add a new record'}</summary>
         <div className="panel-head">
           <h2>CONTROL Session Setup</h2>
           <p>Create control sessions with the same structure used in the main Sessions tab.</p>
@@ -223,7 +231,7 @@ export default function ControlSessionsPage() {
             ) : null}
           </div>
         </form>
-      </section>
+      </details>
 
       <section className="panel table-panel">
         <div className="panel-head">
@@ -239,7 +247,8 @@ export default function ControlSessionsPage() {
             <button type="button" className="danger-btn" onClick={removeAll}>Remove All</button>
           </div>
         </div>
-        <div className="table-wrap">
+        <CollectionToolbar search={search} onSearch={setSearch} count={filteredRows.length} date={dateFilter} onDate={setDateFilter} />
+        <div className="table-wrap ops-bounded-table">
           <table>
             <thead>
               <tr>
@@ -253,7 +262,7 @@ export default function ControlSessionsPage() {
               </tr>
             </thead>
             <tbody>
-              {data.sessions.map((session) => (
+              {filteredRows.map((session) => (
                 <tr key={session.id}>
                   <td>{session.courseName || 'Control Session'}</td>
                   <td>{session.date}</td>
@@ -267,9 +276,9 @@ export default function ControlSessionsPage() {
                   </td>
                 </tr>
               ))}
-              {!data.sessions.length ? (
+              {!filteredRows.length ? (
                 <tr>
-                  <td colSpan="7" className="empty-cell">No control sessions yet.</td>
+                  <td colSpan="7" className="empty-cell">{data.sessions.length ? 'No control sessions match these filters.' : 'No control sessions yet.'}</td>
                 </tr>
               ) : null}
             </tbody>
@@ -283,7 +292,7 @@ export default function ControlSessionsPage() {
           <p>Assign TAs and doctors against each control session record.</p>
         </div>
         <div className="schedule-stack">
-          {data.sessions.map((session) => (
+          {filteredRows.map((session) => (
             <article className="session-card" key={session.id}>
               <div className="session-header">
                 <div>
@@ -343,7 +352,7 @@ export default function ControlSessionsPage() {
               </div>
             </article>
           ))}
-          {!data.sessions.length ? <div className="empty-state">Create a control session first.</div> : null}
+          {!filteredRows.length ? <div className="empty-state">{data.sessions.length ? 'No control sessions match these filters.' : 'Create a control session first.'}</div> : null}
         </div>
       </section>
     </div>

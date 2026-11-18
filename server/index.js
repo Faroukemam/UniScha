@@ -4,6 +4,36 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const XLSX = require('xlsx');
+const { randomUUID } = require('node:crypto');
+
+function normalizeNeedsRow(row) {
+  const fields = new Map(Object.entries(row).map(([key, value]) => [
+    key.trim().toLowerCase().replace(/[\s_-]+/g, ''), value,
+  ]));
+  const read = (...names) => names.map((name) => fields.get(name)).find((value) => value !== undefined && value !== null && String(value).trim() !== '');
+  return {
+    SessionID: read('sessionid', 'id'),
+    Room: read('roomplacement', 'room'),
+    Date: read('date', 'examdate'),
+    Day: read('day'),
+    Start: read('start', 'starttime', 'roomstart'),
+    End: read('end', 'endtime', 'roomend'),
+    CourseCode: read('coursecode', 'coursenames', 'coursename'),
+    TANeeded: read('taneeded', 'tasneeded'),
+    DoctorNeeded: read('doctorneeded', 'doctorsneeded'),
+    InvigilatorsNeeded: read('invigilatorsneeded', 'totalneeded', 'totalstaff'),
+  };
+}
+
+function validateNeedsRow(row) {
+  const counts = [row.TANeeded, row.DoctorNeeded, row.InvigilatorsNeeded];
+  if (counts.every((value) => value === undefined)) return 'missing_needs_columns';
+  if (counts.some((value) => value !== undefined && (!Number.isSafeInteger(Number(value)) || Number(value) < 0))) {
+    return 'invalid_needs_count';
+  }
+  if (row.TANeeded === undefined && row.DoctorNeeded === undefined) return 'missing_role_needs';
+  return '';
+}
 const {
   readStore,
   writeStore,
@@ -29,13 +59,15 @@ const {
   buildOnCallSummary,
   buildOnCallView,
   buildOnCallEligibilityView,
-  buildOnCallAutoScheduleResult,
   buildDutyCollections,
+  buildStaffContinuityView,
   buildWorkloadView,
   buildStaffHourPolicySummary,
   normalizeStaffHourPolicyRow,
   normalizeAssignmentMetadata,
   normalizeOnCallConfig,
+  normalizeSchedulingConfig,
+  SCHEDULING_PREFERENCES,
 } = require('./store');
 const {
   buildReportsSummary,
@@ -43,6 +75,7 @@ const {
   buildFairnessReport,
   buildDailyCoverageReport,
   buildConflictReport,
+  buildEngagementOverrideReport,
   buildStaffReport,
   buildDetailedLoadReport,
   buildSessionCoverageReport,
@@ -79,6 +112,44 @@ const IMPORT_JSON_LIMIT = process.env.IMPORT_JSON_LIMIT || '50mb';
 app.use(express.json({ limit: IMPORT_JSON_LIMIT }));
 app.use('/temp', express.static(tempDir));
 app.use('/api/temp', express.static(tempDir));
+
+// Validate manual record changes before they reach the shared scheduling store.
+// Imports have their own row validation and do not pass through this middleware.
+app.use((req, res, next) => {
+  const match = req.path.match(/^\/api\/(sessions|control-sessions|invigilators|engagements)(?:\/([^/]+))?$/);
+  if (!match || !((req.method === 'POST' && !match[2]) || (req.method === 'PUT' && match[2]))) return next();
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return respondError(res, 'A record object is required.');
+  const collection = { sessions: 'sessions', 'control-sessions': 'controlSessions', invigilators: 'invigilators', engagements: 'engagements' }[match[1]];
+  const store = readStore();
+  const existing = match[2] ? store[collection].find((row) => row.id === match[2]) : null;
+  if (match[2] && !existing) return next(); // Preserve the route's not-found response.
+  const row = { ...existing, ...req.body };
+  const validNumber = (value) => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value));
+  if (collection === 'invigilators') {
+    if (typeof req.body.name !== 'string' || !req.body.name.trim()) return respondError(res, 'A staff name is required.');
+    if (!['TA', 'Doctor'].includes(row.role)) return respondError(res, 'Role must be TA or Doctor.');
+    if (row.maxHours !== undefined && (!validNumber(row.maxHours) || Number(row.maxHours) < 0)) return respondError(res, 'Maximum hours must be a non-negative number.');
+    const staffId = String(req.body.staffId || existing?.staffId || row.name).trim();
+    if (!staffId || store.invigilators.some((person) => person.id !== existing?.id && String(person.staffId).trim() === staffId)) return respondError(res, 'Staff ID must be unique.');
+  } else {
+    const date = normalizeDate(row.date);
+    const parsed = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(date + 'T00:00:00Z') : null;
+    if (!parsed || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return respondError(res, 'A valid calendar date is required.');
+    const start = normalizeTime(row.startTime), end = normalizeTime(row.endTime);
+    const validTime = (value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+    if (!validTime(start) || !validTime(end) || end <= start) return respondError(res, 'End time must be after start time on the same day.');
+    if (collection === 'engagements') {
+      const staffId = String(row.staffId || '').trim();
+      if (!store.invigilators.some((person) => String(person.staffId || person.id) === staffId)) return respondError(res, 'Select an existing staff member.');
+      if (![0, 1].includes(Number(row.engagement ?? 1))) return respondError(res, 'Engagement must be 0 or 1.');
+    } else {
+      for (const field of ['taNeeded', 'doctorNeeded', 'totalNeeded']) {
+        if (row[field] !== undefined && (!validNumber(row[field]) || !Number.isSafeInteger(Number(row[field])) || Number(row[field]) < 0)) return respondError(res, 'Staffing counts must be non-negative whole numbers.');
+      }
+    }
+  }
+  return next();
+});
 
 const PERF_LOG = process.env.PERF_LOG === '1';
 
@@ -146,6 +217,7 @@ function readImportRows(req, res, label) {
 }
 
 function respondPersistenceError(res, error) {
+  if (error.status === 409) return res.status(409).json({ error: error.message });
   console.error('[storage] write failed:', error);
   return res.status(500).json({
     error: 'Failed to persist data.',
@@ -332,15 +404,19 @@ function buildAutoSchedulePayloadForMode(store, mode = 'preserve_all', roleScope
       staff_id: String(item.staffId || item.id),
       role: item.role,
       load_type: item.loadType || 'full',
-      max_hours: Number(item.maxHours || 0)
+      max_hours: Number(item.maxHours || 0),
+      prefer_consecutive_duties: Boolean(hourPolicySummary.effectivePolicyByInvigilatorId.get(item.id)?.preferConsecutiveDuties),
+      prefer_consecutive_days: Boolean(hourPolicySummary.effectivePolicyByInvigilatorId.get(item.id)?.preferConsecutiveDays),
+      allow_engagement_override: hourPolicySummary.effectivePolicyByInvigilatorId.get(item.id)?.allowEngagementOverride ?? true,
     })),
     engagements: store.engagements.map((item) => ({
       staff_id: String(item.staffId || ''),
       exam_date: item.date,
       start_time: item.startTime,
       end_time: item.endTime,
-      engagement: Number(item.engagement ?? 1)
-    })).concat(generatedBusyEngagements),
+      engagement: Number(item.engagement ?? 1),
+      allow_override: hourPolicySummary.effectivePolicyByInvigilatorId.get((store.invigilators.find((person) => String(person.staffId || person.id) === String(item.staffId)))?.id)?.allowEngagementOverride ?? true
+    })).concat(generatedBusyEngagements.map((item) => ({ ...item, hard_conflict: true }))),
     locked_assignments: lockedAssignments,
     staff_hour_policies: (store.staffHourPolicies || []).map((item) => ({
       staff_id: String(item.staffId || invigilatorById.get(item.invigilatorId)?.staffId || ''),
@@ -348,6 +424,9 @@ function buildAutoSchedulePayloadForMode(store, mode = 'preserve_all', roleScope
       mode: item.mode,
       hours_value: Number(item.hoursValue || 0),
       exclude_from_auto_schedule: Boolean(item.excludeFromAutoSchedule || item.mode === 'exclude'),
+      prefer_consecutive_duties: Boolean(item.preferConsecutiveDuties),
+      prefer_consecutive_days: Boolean(item.preferConsecutiveDays),
+      allow_engagement_override: item.allowEngagementOverride ?? true,
       notes: item.notes || '',
     })).filter((item) => item.staff_id),
     existing_duty_minutes_by_staff: (() => {
@@ -361,6 +440,12 @@ function buildAutoSchedulePayloadForMode(store, mode = 'preserve_all', roleScope
       });
       return fixedDutyMinutesByStaff;
     })(),
+    fixed_duties: (() => {
+      const { superDuties, controlDuties, onCallDuties } = buildDutyCollections(store);
+      return [...superDuties, ...controlDuties, ...onCallDuties]
+        .filter((duty) => duty.date && duty.startTime && duty.endTime)
+        .map((duty) => ({ staff_id: String(invigilatorById.get(duty.invigilatorId)?.staffId || duty.invigilatorId), exam_date: duty.date, start_time: duty.startTime, end_time: duty.endTime, duty_type: duty.dutyType === 'OnCall' ? 'on_call' : duty.dutyType.toLowerCase() }));
+    })(),
     additional_required_minutes_by_role: (() => {
       const totals = { TA: 0, Doctor: 0 };
       (store.controlSessions || []).forEach((item) => {
@@ -373,6 +458,15 @@ function buildAutoSchedulePayloadForMode(store, mode = 'preserve_all', roleScope
         totals.TA += Number(item.onCallTANeeded || 0) * durationMinutes;
         totals.Doctor += Number(item.onCallDoctorNeeded || 0) * durationMinutes;
       });
+      // Fixed assignments of the unselected role still use that role's full
+      // demand when calculating average-based policies.
+      if (normalizedRoleScope !== 'both') {
+        store.sessions.forEach((item) => {
+          const durationMinutes = getDurationMinutes(item.startTime, item.endTime);
+          if (normalizedRoleScope === 'ta_only') totals.Doctor += Number(item.doctorNeeded || 0) * durationMinutes;
+          if (normalizedRoleScope === 'doctor_only') totals.TA += Number(item.taNeeded || 0) * durationMinutes;
+        });
+      }
       return totals;
     })(),
     options: {
@@ -384,7 +478,10 @@ function buildAutoSchedulePayloadForMode(store, mode = 'preserve_all', roleScope
       variance_weight: 20,
       duty_weight: 0,
       daily_penalty_weight: 5,
-      max_sessions_per_day_soft: 2
+      max_sessions_per_day_soft: normalizeSchedulingConfig(store.schedulingConfig).dailySoftTarget,
+      preference_order: normalizeSchedulingConfig(store.schedulingConfig).preferenceOrder,
+      scoring_mode: normalizeSchedulingConfig(store.schedulingConfig).scoringMode,
+      preference_weights: normalizeSchedulingConfig(store.schedulingConfig).weights
     }
   };
 
@@ -418,17 +515,17 @@ function runAutoScheduleSolver(payload) {
     child.on('close', (code) => {
       if (settled) return;
       settled = true;
-      if (code !== 0) {
-        reject(new Error(stderr || `Auto-scheduler failed with code ${code}`));
-        return;
-      }
       try {
-        const result = JSON.parse(stdout);
+        const result = JSON.parse(stdout || '{}');
         if (result.error) {
           const error = new Error(result.error);
           error.details = result.details || [];
           error.status = result.status || 'ERROR';
           reject(error);
+          return;
+        }
+        if (code !== 0 || !Array.isArray(result.assignments)) {
+          reject(new Error(stderr || `Auto-scheduler returned no usable result (exit ${code}).`));
           return;
         }
         resolve(result);
@@ -441,6 +538,236 @@ function runAutoScheduleSolver(payload) {
     child.stdin.end();
   });
 }
+
+// A plan contains both duty types, solved together and saved without rerunning.
+const combinedSchedulingPlans = new Map();
+const COMBINED_PLAN_TTL_MS = 10 * 60 * 1000;
+const sessionSchedulingPlans = new Map();
+
+function getSessionSchedulingPlan(token) {
+  const planToken = String(token || '');
+  const plan = sessionSchedulingPlans.get(planToken);
+  if (!plan || plan.expiresAt <= Date.now()) {
+    sessionSchedulingPlans.delete(planToken);
+    const error = new Error('Preview expired or is unavailable. Run preview again.');
+    error.status = 409;
+    throw error;
+  }
+  if (plan.version !== getStoreVersion()) {
+    const error = new Error('Data changed since this preview. Run preview again before saving or exporting.');
+    error.status = 409;
+    throw error;
+  }
+  return plan;
+}
+
+function buildCombinedSchedulingPayload(store, mode, roleScope, dutyScope = 'combined', policyMode = 'strict', shortageExcludedInvigilatorIds = []) {
+  const withoutOnCall = { ...store, onCallAssignments: [] };
+  const built = buildAutoSchedulePayloadForMode(withoutOnCall, dutyScope === 'on_call' ? 'preserve_all' : mode, roleScope);
+  const relaxed = policyMode === 'cover_shortage';
+  const selectedRole = (role) => roleScope === 'both' || (roleScope === 'ta_only' ? role === 'TA' : role === 'Doctor');
+  built.payload.invigilators.forEach((person) => { person.shortage_override = relaxed && selectedRole(person.role) && !person.prefer_consecutive_duties && !person.prefer_consecutive_days && !person.allow_engagement_override; });
+  const excludedStaffIds = new Set(store.invigilators.filter((person) => shortageExcludedInvigilatorIds.includes(person.id)).map((person) => String(person.staffId || person.id)));
+  built.payload.invigilators.forEach((person) => { person.exclude_new_assignments = relaxed && excludedStaffIds.has(person.staff_id); });
+  // Engagement permission comes only from the staff checkbox, even in
+  // shortage mode. Generated busy times and duty overlaps remain hard.
+  if (dutyScope === 'on_call') {
+    built.payload.sessions.forEach((session) => {
+      built.payload.additional_required_minutes_by_role.TA += session.ta_needed * getDurationMinutes(session.start_time, session.end_time);
+      built.payload.additional_required_minutes_by_role.Doctor += session.doctor_needed * getDurationMinutes(session.start_time, session.end_time);
+      session.ta_needed = 0;
+      session.doctor_needed = 0;
+    });
+  }
+  const config = normalizeOnCallConfig(store.onCallConfig);
+  const periods = new Map();
+  const sessionIds = new Set(store.sessions.map((item) => String(item.id)));
+  const personById = new Map(store.invigilators.map((person) => [person.id, person]));
+  built.payload.invigilators.forEach((person) => {
+    const stored = store.invigilators.find((item) => String(item.staffId || item.id) === person.staff_id);
+    person.on_call_excluded = config.excludedInvigilatorIds.includes(stored?.id);
+  });
+  buildOnCallNeeds(store).forEach((period) => {
+    const id = `__on_call__|${period.periodKey}`;
+    if (sessionIds.has(id)) throw new Error('Session identifier conflicts with an on-call period identifier.');
+    periods.set(id, period);
+    const taNeeded = roleScope === 'doctor_only' ? 0 : period.onCallTANeeded;
+    const doctorNeeded = roleScope === 'ta_only' ? 0 : period.onCallDoctorNeeded;
+    built.payload.sessions.push({ id, exam_date: period.date, start_time: period.startTime, end_time: period.endTime, ta_needed: taNeeded, doctor_needed: doctorNeeded, duty_type: 'on_call' });
+    // These needs are now modeled directly, so do not count them twice in targets.
+    built.payload.additional_required_minutes_by_role.TA -= taNeeded * period.durationMinutes;
+    built.payload.additional_required_minutes_by_role.Doctor -= doctorNeeded * period.durationMinutes;
+  });
+  const preservedOnCall = (store.onCallAssignments || []).filter((assignment) => mode !== 'rebalance_all' || shouldPreserveByRoleScope(assignment, roleScope));
+  preservedOnCall.forEach((assignment) => {
+    const id = `__on_call__|${assignment.date}|${assignment.startTime}|${assignment.endTime}`;
+    const person = personById.get(assignment.invigilatorId);
+    if (!periods.has(id) || !person) throw new Error('An existing on-call assignment has no matching period or staff member. Review it before building a combined plan.');
+    built.payload.locked_assignments.push({ session_id: id, staff_id: String(person.staffId || person.id), role: assignment.role });
+  });
+  return { ...built, periods, preservedOnCall };
+}
+
+function summarizeCombinedPlan(store, assignments, onCallAssignments, solver, policyMode = 'strict') {
+  const next = { ...store, assignments, onCallAssignments };
+  const gaps = (source) => {
+    const sessions = buildSchedulingView(source).sessions;
+    const sessionGaps = sessions.reduce((sum, item) => sum + Number(item.taRemaining || 0) + Number(item.doctorRemaining || 0), 0);
+    return { sessions: sessionGaps, onCall: buildOnCallSummary(source).totalShortage };
+  };
+  const before = gaps(store);
+  const after = gaps(next);
+  const keys = (items, onCall = false) => new Set(items.map((item) => onCall
+    ? `oncall|${item.date}|${item.startTime}|${item.endTime}|${item.invigilatorId}|${item.role}`
+    : `session|${item.sessionId}|${item.invigilatorId}|${item.role}`));
+  const oldKeys = new Set([...keys(store.assignments), ...keys(store.onCallAssignments, true)].map((key) => key));
+  const newKeys = new Set([...keys(assignments), ...keys(onCallAssignments, true)].map((key) => key));
+  const currentWorkload = new Map(buildWorkloadView(store).map((person) => [person.id, person]));
+  const staffLoads = buildWorkloadView(next).map((person) => ({
+    staffId: person.staffId, name: person.name, role: person.role,
+    currentHours: Number(currentWorkload.get(person.id)?.totalMinutes || 0) / 60,
+    sessionHours: person.sessionMinutes / 60, onCallHours: person.onCallMinutes / 60,
+    otherHours: (person.superMinutes + person.controlMinutes) / 60,
+    totalHours: person.totalMinutes / 60,
+    targetHours: person.effectiveAllowedHours,
+  }));
+  const people = new Map(store.invigilators.map((person) => [person.id, person]));
+  const sessionsById = new Map(store.sessions.map((session) => [session.id, session]));
+  const duties = [
+    ...assignments.map((assignment) => ({ ...assignment, ...sessionsById.get(assignment.sessionId), invigilatorId: assignment.invigilatorId, role: assignment.role, dutyType: 'Session' })),
+    ...onCallAssignments.map((assignment) => ({ ...assignment, room: 'On-call reserve', dutyType: 'On-call' })),
+  ].map((duty) => ({ DutyType: duty.dutyType, Date: duty.date, Start: duty.startTime, End: duty.endTime, Room: duty.room, StaffID: people.get(duty.invigilatorId)?.staffId, Name: people.get(duty.invigilatorId)?.name, Role: duty.role, ExistingAssignment: oldKeys.has(duty.dutyType === 'On-call' ? `oncall|${duty.date}|${duty.startTime}|${duty.endTime}|${duty.invigilatorId}|${duty.role}` : `session|${duty.sessionId}|${duty.invigilatorId}|${duty.role}`) }));
+  const policyOverrides = [];
+  if (policyMode === 'cover_shortage') {
+    const policies = buildStaffHourPolicySummary(store);
+    const personByStaffId = new Map(store.invigilators.map((person) => [String(person.staffId || person.id), person]));
+    const config = normalizeOnCallConfig(store.onCallConfig);
+    duties.forEach((duty) => {
+      const person = personByStaffId.get(String(duty.StaffID));
+      const policy = policies.effectivePolicyByInvigilatorId.get(person?.id);
+      const add = (rule, detail) => policyOverrides.push({ ...duty, Rule: rule, Detail: detail });
+      if (policy?.excluded) add('Staff excluded', 'Staff-hour policy excludes this staff member.');
+      if (duty.DutyType === 'On-call' && config.excludedInvigilatorIds.includes(person?.id)) add('On-call excluded', 'Staff member is excluded from on-call.');
+      const unavailable = store.engagements.filter((item) => String(item.staffId) === String(duty.StaffID) && item.date === duty.Date && Number(item.engagement ?? 1) === 1 && item.startTime < duty.End && duty.Start < item.endTime);
+      if (unavailable.length) add('Unavailable', [...new Set(unavailable.map((item) => item.notes || 'Marked unavailable'))].join('; '));
+    });
+    staffLoads.forEach((person) => {
+      const stored = personByStaffId.get(String(person.staffId));
+      const policy = policies.effectivePolicyByInvigilatorId.get(stored?.id);
+      if (!policy?.excluded && policy?.hasPolicyLimit && person.totalHours * 60 > policy.allowedMinutes + 0.01) {
+        policyOverrides.push({ StaffID: person.staffId, Name: person.name, Role: person.role, Rule: 'Hour-policy limit', Detail: `${person.totalHours.toFixed(2)}h planned; ${(policy.allowedMinutes / 60).toFixed(2)}h policy limit.`, ExtraHours: Math.round((person.totalHours - policy.allowedMinutes / 60) * 100) / 100 });
+      }
+    });
+  }
+  return {
+    policyMode, policyOverrides,
+    currentTotalShortage: before.sessions + before.onCall,
+    previewTotalShortage: after.sessions + after.onCall,
+    totalShortage: after.sessions + after.onCall,
+    sessionShortage: after.sessions, onCallShortage: after.onCall,
+    assignmentsWouldCreate: [...newKeys].filter((key) => !oldKeys.has(key)).length,
+    assignmentsWouldRemove: [...oldKeys].filter((key) => !newKeys.has(key)).length,
+    assignmentsWouldKeep: [...newKeys].filter((key) => oldKeys.has(key)).length,
+    staffLoads, duties, placedDuties: assignments.length + onCallAssignments.length,
+    selectedSolver: solver.selectedSolver, cpSatStatus: solver.cpSatStatus,
+    fallbackStatus: solver.fallbackStatus, selectionReason: solver.selectionReason,
+    roleHourSpread: solver.roleHourSpread,
+    continuity: solver.continuity || [],
+    defaultStaffBalance: solver.defaultStaffBalance || [],
+    scoringMode: solver.scoringMode || 'ranked',
+    preferenceWeights: solver.preferenceWeights || {},
+    preferenceScore: solver.preferenceScore ?? null,
+    preferenceOrder: solver.preferenceOrder || [],
+    preferenceRepair: solver.preferenceRepair || null,
+    optimizationStages: solver.optimizationStages || [],
+    optimizationSeconds: solver.optimizationSeconds || 0,
+    engagementOverrides: solver.engagementOverrides || [],
+    engagementOverrideMinutes: solver.engagementOverrideMinutes || 0,
+  };
+}
+
+app.get('/api/scheduling/config', (_req, res) => {
+  res.json(normalizeSchedulingConfig(readStore().schedulingConfig));
+});
+
+app.patch('/api/scheduling/config', (req, res) => {
+  const { preferenceOrder, dailySoftTarget, scoringMode, weights } = req.body || {};
+  if (!Array.isArray(preferenceOrder) || preferenceOrder.length !== SCHEDULING_PREFERENCES.length || new Set(preferenceOrder).size !== SCHEDULING_PREFERENCES.length || preferenceOrder.some((key) => !SCHEDULING_PREFERENCES.includes(key))) {
+    return respondError(res, 'Include each editable scheduling priority exactly once.');
+  }
+  if (!Number.isInteger(dailySoftTarget) || dailySoftTarget < 0 || dailySoftTarget > 20) return respondError(res, 'Daily soft target must be an integer between 0 and 20.');
+  if (!['ranked', 'weighted'].includes(scoringMode)) return respondError(res, 'Choose priority order or weighted scoring.');
+  if (!weights || SCHEDULING_PREFERENCES.some((key) => !Number.isInteger(weights[key]) || weights[key] < 0 || weights[key] > 1000) || !SCHEDULING_PREFERENCES.some((key) => weights[key] > 0)) return respondError(res, 'Give every preference a weight from 0 to 1000, with at least one positive weight.');
+  const store = readStore();
+  store.schedulingConfig = normalizeSchedulingConfig({ preferenceOrder, dailySoftTarget, scoringMode, weights });
+  return persistStoreResponse(res, store, store.schedulingConfig);
+});
+
+app.get('/api/scheduling/combined', (_req, res) => {
+  const store = readStore();
+  res.json({ ...buildSchedulingView(store), onCall: buildOnCallView(store), storeVersion: getStoreVersion() });
+});
+
+app.post('/api/scheduling/combined/preview', async (req, res) => {
+  const store = readStore();
+  const version = getStoreVersion();
+  const mode = normalizePreviewMode(req.body?.mode);
+  const roleScope = normalizeRoleScope(req.body?.roleScope);
+  const dutyScope = req.body?.dutyScope === 'on_call' ? 'on_call' : 'combined';
+  const policyMode = req.body?.policyMode ?? 'strict';
+  if (!['strict', 'cover_shortage'].includes(policyMode)) return res.status(400).json({ error: 'Invalid policy mode.' });
+  const shortageExcludedInvigilatorIds = policyMode === 'cover_shortage' ? (req.body?.shortageExcludedInvigilatorIds ?? []) : [];
+  if (!Array.isArray(shortageExcludedInvigilatorIds) || shortageExcludedInvigilatorIds.some((id) => typeof id !== 'string' || !store.invigilators.some((person) => person.id === id))) return res.status(400).json({ error: 'Shortage exclusions must contain valid staff identifiers.' });
+  try {
+    const built = buildCombinedSchedulingPayload(store, mode, roleScope, dutyScope, policyMode, shortageExcludedInvigilatorIds);
+    const result = await runAutoScheduleSolver(built.payload);
+    if (version !== getStoreVersion()) return res.status(409).json({ error: 'Data changed during the preview. Run preview again.' });
+    const byStaffId = new Map(store.invigilators.map((person) => [String(person.staffId || person.id), person.id]));
+    const examRows = result.assignments.filter((item) => !built.periods.has(item.session_id));
+    const assignments = mergeSavedAutoScheduleAssignments(store, examRows, byStaffId, roleScope, dutyScope === 'on_call' ? 'preserve_all' : mode).assignments;
+    const onCallAssignments = [...built.preservedOnCall];
+    const onCallKeys = new Set(onCallAssignments.map((item) => `${item.date}|${item.startTime}|${item.endTime}|${item.invigilatorId}|${item.role}`));
+    result.assignments.filter((item) => built.periods.has(item.session_id)).forEach((item) => {
+      const period = built.periods.get(item.session_id);
+      const invigilatorId = byStaffId.get(String(item.staff_id));
+      const key = `${period.date}|${period.startTime}|${period.endTime}|${invigilatorId}|${item.role}`;
+      if (onCallKeys.has(key)) return;
+      onCallKeys.add(key);
+      onCallAssignments.push({ id: generateId('oncall'), date: period.date, startTime: period.startTime, endTime: period.endTime, invigilatorId, role: item.role, engagementOverrideReason: item.engagement_override_reason || '' });
+    });
+    const summary = summarizeCombinedPlan(store, assignments, onCallAssignments, result, policyMode);
+    summary.shortageExcludedStaff = store.invigilators.filter((person) => shortageExcludedInvigilatorIds.includes(person.id)).map((person) => ({ StaffID: person.staffId || person.id, Name: person.name, Role: person.role }));
+    summary.shortageExcludedInvigilatorIds = shortageExcludedInvigilatorIds;
+    summary.shortageStaff = policyMode === 'cover_shortage' ? store.invigilators.map((person) => ({ id: person.id, staffId: person.staffId || person.id, name: person.name, role: person.role, newDuties: summary.duties.filter((duty) => duty.StaffID === person.staffId && !duty.ExistingAssignment).length, overrides: summary.policyOverrides.filter((row) => row.StaffID === person.staffId).length })).filter((person) => person.newDuties || shortageExcludedInvigilatorIds.includes(person.id)) : [];
+    const now = Date.now();
+    for (const [key, plan] of combinedSchedulingPlans) if (plan.expiresAt <= now) combinedSchedulingPlans.delete(key);
+    while (combinedSchedulingPlans.size >= 20) combinedSchedulingPlans.delete(combinedSchedulingPlans.keys().next().value);
+    const planToken = randomUUID();
+    const expiresAt = now + COMBINED_PLAN_TTL_MS;
+    combinedSchedulingPlans.set(planToken, { version, expiresAt, assignments, onCallAssignments, summary, mode, roleScope, dutyScope });
+    res.json({ ...summary, planToken, expiresAt, previewMode: mode, roleScope, dutyScope, combined: true, dryRun: true, note: 'Preview only. Save applies this exact session and on-call plan. It expires after 10 minutes or when data changes.' });
+  } catch (error) {
+    res.status(400).json({ error: error.message, details: error.details || [] });
+  }
+});
+
+app.post('/api/scheduling/combined/apply', async (req, res) => {
+  const token = String(req.body?.planToken || '');
+  const plan = combinedSchedulingPlans.get(token);
+  if (!plan || plan.expiresAt <= Date.now()) {
+    combinedSchedulingPlans.delete(token);
+    return res.status(409).json({ error: 'Preview expired or is unavailable. Run preview again.' });
+  }
+  if (plan.version !== getStoreVersion()) return res.status(409).json({ error: 'Data changed since this preview. Run preview again before saving.' });
+  const store = readStore();
+  store.assignments = plan.assignments;
+  store.onCallAssignments = plan.onCallAssignments;
+  try {
+    await writeStore(store, { expectedVersion: plan.version });
+    combinedSchedulingPlans.delete(token);
+    res.json({ ...plan.summary, combined: true, dryRun: false, status: plan.summary.totalShortage ? 'COMBINED_PARTIAL' : 'COMBINED_FEASIBLE', placed: plan.summary.placedDuties, shortageRemaining: plan.summary.totalShortage, mode: plan.mode, roleScope: plan.roleScope });
+  } catch (error) { respondPersistenceError(res, error); }
+});
 
 function summarizeCurrentAssignmentState(store, hourPolicySummary) {
   const workloadRows = buildWorkloadView(store);
@@ -464,16 +791,16 @@ function summarizeCurrentAssignmentState(store, hourPolicySummary) {
     if (!excluded && allowedHours > 0 && assignedHours > allowedHours) {
       overTargetStaff.push(staffId);
     }
-    if (hardLimitHours > 0 && assignedHours > hardLimitHours) {
+    if (policy?.hasHardLimit && assignedHours > hardLimitHours) {
       overHardLimitStaff.push(staffId);
     }
     if (!excluded && allowedHours > 0 && assignedHours < allowedHours) {
       underTargetStaff.push(staffId);
     }
-    if (row.role === 'Doctor') {
+    if (!excluded && row.role === 'Doctor') {
       roleHours.Doctor.push(assignedHours);
       maxAssignedHoursByRole.Doctor = Math.max(maxAssignedHoursByRole.Doctor, assignedHours);
-    } else {
+    } else if (!excluded) {
       roleHours.TA.push(assignedHours);
       maxAssignedHoursByRole.TA = Math.max(maxAssignedHoursByRole.TA, assignedHours);
     }
@@ -541,7 +868,7 @@ function summarizePreviewAssignmentState(store, result, hourPolicySummary) {
       excluded,
     };
 
-    if (hardLimitHours > 0 && assignedHours > hardLimitHours) {
+    if (policy?.hasHardLimit && assignedHours > hardLimitHours) {
       overHardLimitStaff.push(staffId);
     }
     if (!excluded && allowedHours > 0 && assignedHours > allowedHours) {
@@ -673,6 +1000,19 @@ function buildAutoSchedulePreviewPayload(store, payload, result, hourPolicySumma
     uncoveredSessionCount: Number(result.selectedMetrics?.uncoveredSessionCount ?? (result.uncovered_sessions || []).length),
     placedDuties: Number(result.selectedMetrics?.placedDuties ?? result.placed ?? 0),
     assignedHoursByStaff: previewAssignedHoursByStaff,
+    sessionHoursByStaff: result.sessionHoursByStaff || {},
+    onCallHoursByStaff: result.onCallHoursByStaff || {},
+    defaultStaffBalance: result.defaultStaffBalance || [],
+    scoringMode: result.scoringMode || 'ranked',
+    preferenceWeights: result.preferenceWeights || {},
+    preferenceScore: result.preferenceScore ?? null,
+    preferenceOrder: result.preferenceOrder || [],
+    preferenceRepair: result.preferenceRepair || null,
+    optimizationStages: result.optimizationStages || [],
+    optimizationSeconds: result.optimizationSeconds || 0,
+    engagementOverrides: result.engagementOverrides || [],
+    engagementOverrideMinutes: result.engagementOverrideMinutes || 0,
+    continuity: result.continuity || [],
     averageHoursByRole: result.averageHoursByRole || hourPolicySummary.rawAverageHoursByRole,
     effectiveAllowedHoursByStaff: result.effectiveAllowedHoursByStaff || {},
     overHardLimitStaff: previewState.overHardLimitStaff,
@@ -739,6 +1079,7 @@ function buildPreviewAssignmentRows(store, previewResult) {
       ? normalizeAssignmentMetadata(assignmentLike, { sourceFallback: 'legacy', lockedFallback: true })
       : normalizeAssignmentMetadata(currentMetadata || {
         assignmentSource: 'auto',
+        engagementOverrideReason: assignmentLike.engagement_override_reason || '',
         locked: false,
         createdAt: '',
         updatedAt: '',
@@ -847,6 +1188,8 @@ function buildPreviewStaffHourComparisonRows(store, previewResult) {
       EffectiveAllowedHours: Number(previewResult.effectiveAllowedHoursByStaff?.[String(person.staffId || '')] ?? effectivePolicy?.allowedHours ?? 0),
       CurrentHours: currentHours,
       PreviewHours: projectedHours,
+      SessionHours: Number(previewResult.sessionHoursByStaff?.[String(person.staffId || '')] || 0),
+      OnCallHours: Number(previewResult.onCallHoursByStaff?.[String(person.staffId || '')] || 0),
       Difference: Math.round((projectedHours - currentHours) * 100) / 100,
       AssignmentSource: '',
       Locked: '',
@@ -949,6 +1292,11 @@ function buildPreviewExportFile(store, previewResult) {
     { name: 'UnderTargetStaff', rows: underTargetRows },
     { name: 'PolicyViolations', rows: policyViolationRows },
     { name: 'SolverDiagnostics', rows: buildPreviewDiagnosticsRows(previewResult) },
+    { name: 'StaffContinuity', rows: previewResult.continuity || [] },
+    { name: 'DefaultStaffBalance', rows: previewResult.defaultStaffBalance || [] },
+    { name: 'EngagementOverrides', rows: previewResult.engagementOverrides || [] },
+    { name: 'OptimizationStages', rows: previewResult.optimizationStages || [] },
+    { name: 'PreferenceOrder', rows: (previewResult.preferenceOrder || []).map((priority, index) => ({ rank: index + 1, priority, mode: previewResult.scoringMode || 'ranked', weight: previewResult.preferenceWeights?.[priority] ?? '' })) },
   ], 'auto_schedule_preview');
 }
 
@@ -984,6 +1332,7 @@ function mergeSavedAutoScheduleAssignments(store, solverAssignments, staffIdToIn
         invigilatorId,
         role: item.role,
         assignmentSource: 'auto',
+        engagementOverrideReason: item.engagement_override_reason || '',
         locked: false,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -1310,6 +1659,7 @@ function normalizeAssignmentRow(row, index, preserveInputId = false) {
     invigilatorId: String(row.invigilatorId ?? row.staff_id ?? row.staffId ?? row.StaffID ?? '').trim(),
     role: normalizeRole(row.role ?? row.Role),
     assignmentSource: String(row.AssignmentSource ?? row.assignmentSource ?? row.assignment_source ?? row.Source ?? row.source ?? 'import').trim(),
+    engagementOverrideReason: String(row.EngagementOverrideReason ?? row.engagementOverrideReason ?? '').trim(),
     locked: row.Locked ?? row.locked,
     createdAt: String(row.CreatedAt ?? row.createdAt ?? row.created_at ?? '').trim(),
     updatedAt: String(row.UpdatedAt ?? row.updatedAt ?? row.updated_at ?? '').trim(),
@@ -1590,6 +1940,7 @@ function makeSchedulingAssignmentRows(store) {
       Start: session?.startTime || '',
       End: session?.endTime || '',
       AssignmentSource: normalized.assignmentSource || 'legacy',
+      EngagementOverrideReason: normalized.engagementOverrideReason || '',
       Locked: normalized.locked ? 'Yes' : 'No',
       CreatedAt: normalized.createdAt || '',
       UpdatedAt: normalized.updatedAt || '',
@@ -1630,9 +1981,9 @@ function buildSchedulingStaffReferenceRows(store) {
       Department: person.department || '',
       CurrentAssignedHours: Math.round(((Number(row.totalMinutes || 0) / 60) || 0) * 100) / 100,
       RoleAverageHours: Number(row.roleAverageHours || 0),
-      EffectiveAllowedHours: Number(row.allowedHours || 0),
+      EffectiveAllowedHours: Number(row.effectiveAllowedHours || 0),
       PolicyMode: row.policyMode || 'default',
-      ExcludedFromAutoSchedule: row.excluded ? 'Yes' : 'No',
+      ExcludedFromAutoSchedule: row.excludeFromAutoSchedule ? 'Yes' : 'No',
     };
   });
 }
@@ -1662,10 +2013,11 @@ function buildSchedulingCurrentAssignmentRows(store) {
       StaffID: person?.staffId || '',
       StaffName: person?.name || '',
       AssignmentSource: normalized.assignmentSource || 'legacy',
+      EngagementOverrideReason: normalized.engagementOverrideReason || '',
       Locked: normalized.locked ? 'Yes' : 'No',
       CurrentAssignedHours: Math.round(((Number(workload.totalMinutes || 0) / 60) || 0) * 100) / 100,
       RoleAverageHours: Number(workload.roleAverageHours || 0),
-      EffectiveAllowedHours: Number(workload.allowedHours || 0),
+      EffectiveAllowedHours: Number(workload.effectiveAllowedHours || 0),
       PolicyMode: workload.policyMode || 'default',
       Notes: normalized.notes || '',
     };
@@ -2818,6 +3170,7 @@ function makeOnCallAssignmentRows(store) {
     const person = invigilatorById.get(assignment.invigilatorId);
     return {
       AssignmentID: assignment.id || '',
+      EngagementOverrideReason: assignment.engagementOverrideReason || '',
       Date: assignment.date || '',
       Start: assignment.startTime || '',
       End: assignment.endTime || '',
@@ -2829,20 +3182,67 @@ function makeOnCallAssignmentRows(store) {
 }
 
 function makeStaffHourPolicyRows(store) {
-  const invigilatorById = new Map(store.invigilators.map((person) => [person.id, person]));
-  return (store.staffHourPolicies || []).map((policy) => {
-    const person = invigilatorById.get(policy.invigilatorId);
+  const summary = buildStaffHourPolicySummary(store);
+  const workloadById = new Map(buildWorkloadView(store).map((row) => [row.id, row]));
+  return store.invigilators.map((person) => {
+    const policy = (store.staffHourPolicies || []).find((item) => item.invigilatorId === person.id) || {};
+    const effective = summary.effectivePolicyByInvigilatorId.get(person.id);
+    const workload = makeStaffHourWorkloadFields(workloadById.get(person.id), effective);
     return {
       PolicyID: policy.id || '',
+      InvigilatorID: person.id,
       StaffID: policy.staffId || person?.staffId || '',
       Name: person?.name || '',
       Role: policy.role || person?.role || '',
       Mode: policy.mode || 'default',
       HoursValue: Number(policy.hoursValue || 0),
+      MaxHours: Number(person.maxHours || 0),
+      SessionHours: workload.sessionHours,
+      OnCallHours: workload.onCallHours,
+      SuperHours: workload.superHours,
+      ControlHours: workload.controlHours,
+      CurrentAssignedHours: workload.currentAssignedHours,
+      RemainingHours: workload.remainingHours ?? '',
+      RoleAverageHours: effective?.rawAverageHours ?? 0,
+      EffectiveAllowedHours: effective?.allowedHours ?? 0,
+      EffectiveLimitHours: effective?.hasHardLimit ? effective.hardLimitHours : '',
       ExcludeFromAutoSchedule: policy.excludeFromAutoSchedule ? 'Yes' : 'No',
+      PreferConsecutiveDuties: policy.preferConsecutiveDuties ? 'Yes' : 'No',
+      PreferConsecutiveDays: policy.preferConsecutiveDays ? 'Yes' : 'No',
+      AllowEngagementOverride: policy.allowEngagementOverride === false ? 'No' : 'Yes',
       Notes: policy.notes || '',
     };
   });
+}
+
+function makeStaffHourWorkloadFields(workload, effective) {
+  const hours = (minutes) => Math.round((Number(minutes || 0) / 60) * 100) / 100;
+  const currentAssignedMinutes = Number(workload?.totalMinutes || 0);
+  return {
+    currentAssignedMinutes,
+    currentAssignedHours: hours(currentAssignedMinutes),
+    sessionHours: hours(workload?.sessionMinutes),
+    onCallHours: hours(workload?.onCallMinutes),
+    superHours: hours(workload?.superMinutes),
+    controlHours: hours(workload?.controlMinutes),
+    onCallCount: Number(workload?.onCallCount || 0),
+    remainingHours: effective?.hasHardLimit ? hours(Math.max(0, effective.hardLimitMinutes - currentAssignedMinutes)) : null,
+  };
+}
+
+function makeStaffHourPolicyInstructions() {
+  return [
+    { Topic: 'Editing', Instruction: 'Edit the StaffHourPolicies sheet, then import this workbook. StaffID identifies staff; keep IDs as text, including leading zeros. Names and roles are reference only.' },
+    { Topic: 'Modes', Instruction: 'Mode is required: default uses the flexible role average; exact sets a strict hour limit; add/reduce adjust the current role average; exclude blocks automatic assignment.' },
+    { Topic: 'HoursValue', Instruction: 'Enter non-negative hours for exact/add/reduce. Decimals and zero are supported. A blank value is permitted only for default/exclude.' },
+    { Topic: 'Exclusion', Instruction: 'ExcludeFromAutoSchedule accepts Yes/No, True/False, or 1/0. Blank means No; mode exclude always excludes.' },
+    { Topic: 'Continuity', Instruction: 'PreferConsecutiveDuties minimizes idle minutes within days. PreferConsecutiveDays minimizes calendar days off between working dates. Each accepts Yes/No, True/False or 1/0; blank means No. Both respect all other policies; engagements may be overridden only when AllowEngagementOverride is Yes. Coverage comes first.' },
+    { Topic: 'Engagement override', Instruction: 'AllowEngagementOverride defaults to Yes, including for existing staff. Yes allows automatic assignments during engagements to fill shortages or improve workload balance. No keeps engagements strict. Other policies, hour limits, exclusions and duty overlaps remain strict. Overrides are listed in preview and export; availability records are retained.' },
+    { Topic: 'Updates', Instruction: 'Only listed staff are updated. One row per staff member. Existing policies keep their IDs. Blank Notes clears notes. To reset a policy, use Mode default, HoursValue 0, No for exclusion and both consecutive preferences, and blank Notes.' },
+    { Topic: 'Reference columns', Instruction: 'PolicyID and InvigilatorID are identifiers. Name, Role, MaxHours, workload hours, RoleAverageHours, EffectiveAllowedHours and EffectiveLimitHours are reference values; editing them does not change staff or calculated hours.' },
+    { Topic: 'Workload', Instruction: 'CurrentAssignedHours includes SessionHours + OnCallHours + SuperHours + ControlHours. On-call duties use their full duration and count once. RemainingHours is the remaining hard-limit capacity across all duties; blank means no fixed cap. Role averages include required on-call staffing, including unfilled on-call needs.' },
+    { Topic: 'Scheduling', Instruction: 'Policies affect total duties and recalculate from current needs. Import does not change existing assignments; rerun scheduling when ready.' },
+  ];
 }
 
 function makeStaffHourPolicyTemplateRows() {
@@ -2855,6 +3255,9 @@ function makeStaffHourPolicyTemplateRows() {
       HoursValue: 12,
       ExcludeFromAutoSchedule: 'No',
       Notes: 'Exact allowed hours example',
+      PreferConsecutiveDuties: 'Yes',
+      PreferConsecutiveDays: 'No',
+      AllowEngagementOverride: 'Yes',
     },
     {
       StaffID: 'DR003',
@@ -2864,6 +3267,9 @@ function makeStaffHourPolicyTemplateRows() {
       HoursValue: 3,
       ExcludeFromAutoSchedule: 'No',
       Notes: 'Reduce from role average by 3 hours',
+      PreferConsecutiveDuties: 'No',
+      PreferConsecutiveDays: 'Yes',
+      AllowEngagementOverride: 'Yes',
     },
     {
       StaffID: 'DR004',
@@ -2873,6 +3279,9 @@ function makeStaffHourPolicyTemplateRows() {
       HoursValue: 0,
       ExcludeFromAutoSchedule: 'Yes',
       Notes: 'Do not assign in auto-schedule',
+      PreferConsecutiveDuties: 'No',
+      PreferConsecutiveDays: 'No',
+      AllowEngagementOverride: 'Yes',
     },
   ];
 }
@@ -2897,12 +3306,25 @@ function buildStaffHourPolicyWarnings(store) {
       if (policy.excluded && Number(row.totalMinutes || 0) > 0) {
         return `${row.name} is excluded but already has ${Math.round((row.totalMinutes / 60) * 100) / 100} assigned hours.`;
       }
-      if (policy.hardLimitMinutes > 0 && Number(row.totalMinutes || 0) > policy.hardLimitMinutes) {
+      if (policy.hasHardLimit && Number(row.totalMinutes || 0) > policy.hardLimitMinutes) {
         return `${row.name} exceeds allowed hours (${Math.round((row.totalMinutes / 60) * 100) / 100} > ${policy.hardLimitHours}).`;
       }
       return null;
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .concat(buildStaffContinuityView(store).map(staffContinuityWarning).filter(Boolean));
+}
+
+function staffContinuityWarning(row) {
+  const gaps = [];
+  if (row.preferConsecutiveDays && row.workingDayGaps) gaps.push(`${row.workingDayGaps} days off between working dates`);
+  if (row.preferConsecutiveDuties && row.idleMinutes) gaps.push(`${row.idleMinutes} idle minutes within working days`);
+  return gaps.length ? `${row.name}: ${gaps.join('; ')}. Consecutive scheduling is a preference; existing duties are retained.` : '';
+}
+
+function assignmentContinuityWarning(store, invigilatorId) {
+  const row = buildStaffContinuityView(store).find((item) => item.invigilatorId === invigilatorId);
+  return row ? staffContinuityWarning(row) : '';
 }
 
 function normalizeStaffHourPolicyInput(store, payload = {}, existingId = '') {
@@ -2929,7 +3351,10 @@ function normalizeStaffHourPolicyInput(store, payload = {}, existingId = '') {
     role: person.role,
     mode,
     hoursValue,
-    excludeFromAutoSchedule: mode === 'exclude' || Boolean(payload.excludeFromAutoSchedule) || parseBooleanFlag(payload.ExcludeFromAutoSchedule),
+    excludeFromAutoSchedule: mode === 'exclude' || parseBooleanFlag(payload.excludeFromAutoSchedule ?? payload.ExcludeFromAutoSchedule),
+    preferConsecutiveDuties: parseBooleanFlag(payload.preferConsecutiveDuties ?? payload.PreferConsecutiveDuties ?? payload.prefer_consecutive_duties),
+    preferConsecutiveDays: parseBooleanFlag(payload.preferConsecutiveDays ?? payload.PreferConsecutiveDays ?? payload.prefer_consecutive_days),
+    allowEngagementOverride: parseBooleanFlag(payload.allowEngagementOverride ?? payload.AllowEngagementOverride ?? payload.allow_engagement_override ?? true),
     notes: String(payload.notes ?? payload.Notes ?? '').trim(),
   }, new Map(store.invigilators.map((item) => [String(item.staffId || ''), item.id])));
 }
@@ -3290,6 +3715,7 @@ app.get('/api/staff-hour-policies', (_req, res) => {
     policies: (store.staffHourPolicies || []),
     averagesByRole: summary.rawAverageHoursByRole,
     totalRequiredHoursByRole: summary.totalRequiredHoursByRole,
+    onCallRequiredHoursByRole: summary.onCallRequiredHoursByRole,
     availableStaffCountByRole: summary.availableStaffCountByRole,
     effectivePolicyByStaff: Object.fromEntries(
       Array.from(summary.effectivePolicyByInvigilatorId.entries()).map(([invigilatorId, value]) => [invigilatorId, value])
@@ -3300,7 +3726,7 @@ app.get('/api/staff-hour-policies', (_req, res) => {
     warnings: buildStaffHourPolicyWarnings(store),
     rows: store.invigilators.map((person) => ({
       ...person,
-      currentAssignedHours: Math.round((Number(workloadByInvigilatorId.get(person.id)?.totalMinutes || 0) / 60) * 100) / 100,
+      ...makeStaffHourWorkloadFields(workloadByInvigilatorId.get(person.id), summary.effectivePolicyByInvigilatorId.get(person.id)),
       effectivePolicy: summary.effectivePolicyByInvigilatorId.get(person.id) || null,
       policy: (store.staffHourPolicies || []).find((item) => item.invigilatorId === person.id) || null,
     })),
@@ -3636,24 +4062,33 @@ app.get('/api/on-call/eligible', (req, res) => {
   });
 });
 
-app.post('/api/on-call/auto-assign', (req, res) => {
+app.post('/api/on-call/auto-assign', async (req, res) => {
   const store = readStore();
   const dryRun = Boolean(req.body?.dryRun);
-  const result = buildOnCallAutoScheduleResult(store, { dryRun });
-  if (dryRun) {
-    return res.json({
-      success: true,
-      dryRun: true,
-      note: 'Dry-run only. No data was saved.',
-      ...result.summary,
+  const version = getStoreVersion();
+  try {
+    const built = buildCombinedSchedulingPayload(store, 'rebalance_all', 'both', 'on_call', 'strict');
+    const solved = await runAutoScheduleSolver(built.payload);
+    if (version !== getStoreVersion()) return res.status(409).json({ error: 'Data changed while scheduling. Run on-call scheduling again.' });
+    const byStaff = new Map(store.invigilators.map((person) => [String(person.staffId || person.id), person]));
+    const onCallAssignments = solved.assignments.filter((row) => built.periods.has(row.session_id)).map((row) => {
+      const period = built.periods.get(row.session_id);
+      return { id: generateId('oncall'), date: period.date, startTime: period.startTime, endTime: period.endTime, invigilatorId: byStaff.get(row.staff_id).id, role: row.role, engagementOverrideReason: row.engagement_override_reason || '' };
     });
+    const nextStore = { ...store, onCallAssignments };
+    const summary = buildOnCallSummary(nextStore);
+    const view = buildOnCallView(nextStore);
+    if (!dryRun) await writeStore(nextStore, { expectedVersion: version });
+    return res.json({ success: true, dryRun, rebalanced: true, previousAssignmentCount: store.onCallAssignments.length,
+      addedCount: onCallAssignments.length, remainingTAShortage: Number(summary.shortage?.ta || 0),
+      remainingDoctorShortage: Number(summary.shortage?.doctor || 0), totalRemainingShortage: summary.totalShortage,
+      createdAssignments: onCallAssignments, periods: view.periods, config: view.config,
+      continuity: solved.continuity, defaultStaffBalance: solved.defaultStaffBalance, engagementOverrides: solved.engagementOverrides, engagementOverrideMinutes: solved.engagementOverrideMinutes, selectedSolver: solved.selectedSolver,
+      note: dryRun ? 'Dry-run only. No data was saved.' : 'On-call auto-assign completed.' });
+  } catch (error) {
+    if (error.status === 409) return respondPersistenceError(res, error);
+    return res.status(400).json({ error: error.message, details: error.details || [] });
   }
-  return persistStoreResponse(res, result.nextStore, () => res.json({
-    success: true,
-    dryRun: false,
-    note: 'On-call auto-assign completed.',
-    ...result.summary,
-  }));
 });
 
 app.post('/api/scheduling/assign', (req, res) => {
@@ -3718,7 +4153,7 @@ app.post('/api/scheduling/assign', (req, res) => {
     notes: '',
   };
   store.assignments.push(assignment);
-  return persistStoreResponse(res, store, () => res.status(201).json(assignment));
+  return persistStoreResponse(res, store, () => res.status(201).json({ ...assignment, continuityWarning: assignmentContinuityWarning(store, invigilatorId) }));
 });
 
 app.post('/api/on-call/assign', (req, res) => {
@@ -3787,7 +4222,7 @@ app.post('/api/on-call/assign', (req, res) => {
     role: person.role,
   };
   store.onCallAssignments.push(assignment);
-  return persistStoreResponse(res, store, () => res.status(201).json(assignment));
+  return persistStoreResponse(res, store, () => res.status(201).json({ ...assignment, continuityWarning: assignmentContinuityWarning(store, invigilatorId) }));
 });
 
 app.delete('/api/scheduling/assign/:id', (req, res) => {
@@ -3961,6 +4396,9 @@ app.post('/api/super-invigilators/assign', (req, res) => {
   }
   if (person.role !== 'Doctor') {
     return respondError(res, 'Super invigilators must be doctors only.');
+  }
+  if (!window) {
+    return respondError(res, 'Supervision requires an existing exam-day window.');
   }
 
   const duplicate = store.superAssignments.find(
@@ -4275,11 +4713,22 @@ app.get('/api/workload', (_req, res) => {
 
 app.post('/api/scheduling/auto-schedule-preview', async (req, res) => {
   const store = readStore();
-  const mode = String(req.body?.mode || 'preserve_all').trim().toLowerCase() || 'preserve_all';
+  const version = getStoreVersion();
+  const mode = normalizePreviewMode(req.body?.mode);
   const roleScope = normalizeRoleScope(req.body?.roleScope || 'both');
   try {
     const preview = await computeAutoSchedulePreview(store, mode, roleScope);
-    res.json(preview);
+    if (version !== getStoreVersion()) return res.status(409).json({ error: 'Data changed during the preview. Run preview again.' });
+    const { payload } = buildAutoSchedulePayloadForMode(store, mode, roleScope);
+    const byStaffId = new Map(store.invigilators.map((person) => [String(person.staffId || person.id), person.id]));
+    const mergedAssignments = mergeSavedAutoScheduleAssignments(store, preview.solver.assignments, byStaffId, roleScope, mode);
+    const now = Date.now();
+    for (const [key, plan] of sessionSchedulingPlans) if (plan.expiresAt <= now) sessionSchedulingPlans.delete(key);
+    while (sessionSchedulingPlans.size >= 20) sessionSchedulingPlans.delete(sessionSchedulingPlans.keys().next().value);
+    const planToken = randomUUID();
+    const expiresAt = now + COMBINED_PLAN_TTL_MS;
+    sessionSchedulingPlans.set(planToken, { version, expiresAt, store, preview, payload, mergedAssignments });
+    res.json({ ...preview, planToken, expiresAt });
   } catch (error) {
     res.status(400).json({
       error: error.message,
@@ -4293,28 +4742,23 @@ app.post('/api/scheduling/auto-schedule-preview', async (req, res) => {
 });
 
 app.post('/api/scheduling/auto-schedule-preview/export', async (req, res) => {
-  const store = readStore();
-  const mode = String(req.body?.mode || 'preserve_all').trim().toLowerCase() || 'preserve_all';
-  const roleScope = normalizeRoleScope(req.body?.roleScope || 'both');
   try {
-    const preview = await computeAutoSchedulePreview(store, mode, roleScope);
+    const { store, preview } = getSessionSchedulingPlan(req.body?.planToken);
     const file = buildPreviewExportFile(store, preview);
     res.json({
       success: true,
       dryRun: true,
-      previewMode: mode,
-      roleScope,
+      previewMode: preview.previewMode,
+      roleScope: preview.roleScope,
       note: 'Preview export only. No data was saved.',
       ...file,
     });
   } catch (error) {
-    res.status(400).json({
+    res.status(error.status === 409 ? 409 : 400).json({
       error: error.message,
       details: error.details || [],
       status: error.status || 'ERROR',
       dryRun: true,
-      previewMode: mode,
-      roleScope,
     });
   }
 });
@@ -4381,65 +4825,47 @@ app.post('/api/scheduling/assign/lock-plan/import', (req, res) => {
   }));
 });
 
-app.post('/api/scheduling/auto-schedule', (req, res) => {
-  const store = readStore();
-  const roleScope = normalizeRoleScope(req.body?.roleScope || 'both');
-  const mode = normalizePreviewMode(req.body?.mode || 'preserve_manual_only');
-  const { payload, hourPolicySummary } = buildAutoSchedulePayloadForMode(store, mode, roleScope);
-  const staffIdToInvigilatorId = new Map(store.invigilators.map((item) => [String(item.staffId || item.id), item.id]));
+app.post('/api/scheduling/auto-schedule', async (req, res) => {
+  try {
+    const plan = getSessionSchedulingPlan(req.body?.planToken);
+    const { store, payload, preview, mergedAssignments } = plan;
+    const { roleScope, previewMode: mode, solver: result, hourPolicySummary } = preview;
+    const staffIdToInvigilatorId = new Map(store.invigilators.map((item) => [String(item.staffId || item.id), item.id]));
+    const nextStore = { ...store, assignments: mergedAssignments.assignments };
+    const assignmentKeys = new Set(nextStore.assignments.map((item) => `${item.sessionId}|${item.invigilatorId}|${item.role}`));
+    const lockedAssignmentsPreserved = payload.locked_assignments.filter((item) => {
+      const invigilatorId = staffIdToInvigilatorId.get(String(item.staff_id));
+      return invigilatorId && assignmentKeys.has(`${item.session_id}|${invigilatorId}|${item.role}`);
+    }).length;
+    const shortagesRemaining = (result.uncovered_sessions || []).reduce((sum, item) => sum + Number(item.remaining || item.shortage || 0), 0);
 
-  runAutoScheduleSolver(payload)
-    .then((result) => {
-      const assignmentsBefore = store.assignments.length;
-      const lockedAssignmentsBefore = payload.locked_assignments.length;
-      const mergedAssignments = mergeSavedAutoScheduleAssignments(store, result.assignments || [], staffIdToInvigilatorId, roleScope, mode);
-      store.assignments = mergedAssignments.assignments;
-      const assignmentKeys = new Set(store.assignments.map((item) => `${item.sessionId}|${item.invigilatorId}|${item.role}`));
-      const lockedAssignmentsPreserved = payload.locked_assignments.filter((item) => {
-        const invigilatorId = staffIdToInvigilatorId.get(String(item.staff_id));
-        return invigilatorId && assignmentKeys.has(`${item.session_id}|${invigilatorId}|${item.role}`);
-      }).length;
-      const newAssignmentsCreated = mergedAssignments.nextAutoAssignments.length;
-      const shortagesRemaining = Array.isArray(result.uncovered_sessions)
-        ? result.uncovered_sessions.reduce((sum, item) => sum + Number(item.remaining || item.shortage || 0), 0)
-        : 0;
-
-      writeStore(store)
-        .then(() => {
-          res.json({
-            ...result,
-            assignments: store.assignments,
-            hourPolicySummary: {
-              rawAverageHoursByRole: hourPolicySummary.rawAverageHoursByRole,
-              totalRequiredHoursByRole: hourPolicySummary.totalRequiredHoursByRole,
-              availableStaffCountByRole: hourPolicySummary.availableStaffCountByRole,
-            },
-            persistence: {
-              mode,
-              roleScope,
-              assignmentsBefore,
-              assignmentsAfter: store.assignments.length,
-              lockedAssignmentsBefore,
-              lockedAssignmentsPreserved,
-              manualPreserved: mergedAssignments.preservedManualAssignments,
-              legacyPreserved: mergedAssignments.preservedLegacyAssignments,
-              importPreserved: mergedAssignments.preservedImportAssignments,
-              lockedPreserved: mergedAssignments.preservedLockedAssignments,
-              preservedByRoleScopeAssignments: mergedAssignments.preservedByRoleScopeAssignments,
-              preservedDoctorAssignments: mergedAssignments.preservedDoctorAssignments,
-              preservedTAAssignments: mergedAssignments.preservedTAAssignments,
-              autoRemoved: mergedAssignments.autoAssignmentsRemoved,
-              newAssignmentsCreated,
-              shortagesRemaining,
-              replaceMode: true,
-            },
-          });
-        })
-        .catch((error) => respondPersistenceError(res, error));
-    })
-    .catch((error) => {
-      res.status(400).json({ error: error.message, details: error.details || [], status: error.status || 'ERROR' });
+    await writeStore(nextStore, { expectedVersion: plan.version });
+    sessionSchedulingPlans.delete(String(req.body.planToken));
+    res.json({
+      ...result,
+      assignments: nextStore.assignments,
+      hourPolicySummary,
+      persistence: {
+        mode,
+        roleScope,
+        assignmentsBefore: store.assignments.length,
+        assignmentsAfter: nextStore.assignments.length,
+        lockedAssignmentsBefore: payload.locked_assignments.length,
+        lockedAssignmentsPreserved,
+        manualPreserved: mergedAssignments.preservedManualAssignments,
+        legacyPreserved: mergedAssignments.preservedLegacyAssignments,
+        importPreserved: mergedAssignments.preservedImportAssignments,
+        lockedPreserved: mergedAssignments.preservedLockedAssignments,
+        preservedByRoleScopeAssignments: mergedAssignments.preservedByRoleScopeAssignments,
+        preservedDoctorAssignments: mergedAssignments.preservedDoctorAssignments,
+        preservedTAAssignments: mergedAssignments.preservedTAAssignments,
+        autoRemoved: mergedAssignments.autoAssignmentsRemoved,
+        newAssignmentsCreated: mergedAssignments.nextAutoAssignments.length,
+        shortagesRemaining,
+        replaceMode: true,
+      },
     });
+  } catch (error) { respondPersistenceError(res, error); }
 });
 
 app.post('/api/room-capability/optimize', (req, res) => {
@@ -4515,22 +4941,24 @@ app.post('/api/import/session-needs', (req, res) => {
   const rows = readImportRows(req, res, 'Session needs');
   if (!rows) return;
   const byId = new Map(store.sessions.map((session) => [String(session.id), session]));
-  const byBlock = new Map(store.sessions.map((session) => [buildSessionRoomStartKey(session), session]));
-  const byBlockCourse = new Map(store.sessions.map((session) => [buildSessionBlockCourseKey(session), session]));
-  const byExact = new Map(store.sessions.map((session) => [buildSessionTimeRoomKey(session), session]));
-  const byTimeRoom = new Map();
-
+  const byBlock = new Map();
   store.sessions.forEach((session) => {
     const key = buildSessionRoomStartKey(session);
-    if (!byTimeRoom.has(key)) {
-      byTimeRoom.set(key, session);
-    }
+    if (!byBlock.has(key)) byBlock.set(key, []);
+    byBlock.get(key).push(session);
   });
 
   const unmatched = [];
+  const rejected = [];
   let updated = 0;
 
-  rows.forEach((row, index) => {
+  rows.forEach((sourceRow, index) => {
+    const row = normalizeNeedsRow(sourceRow);
+    const invalidReason = validateNeedsRow(row);
+    if (invalidReason) {
+      rejected.push({ row: index + 2, reason: invalidReason });
+      return;
+    }
     const courseNames = normalizeCourseNames(readCourseInput(row));
     const importedSession = {
       date: normalizeDate(row.Date ?? row.date, row.Day ?? row.day),
@@ -4541,10 +4969,23 @@ app.post('/api/import/session-needs', (req, res) => {
       courseName: formatCourseNames(courseNames)
     };
     const sessionId = String(row.SessionID ?? row.sessionId ?? row.id ?? '').trim();
-    const session = byId.get(sessionId)
-      || byBlock.get(buildSessionRoomStartKey(importedSession))
-      || byBlockCourse.get(buildSessionBlockCourseKey(importedSession))
-      || byExact.get(buildSessionTimeRoomKey(importedSession));
+    let session = byId.get(sessionId);
+    let candidates = [];
+    if (!session && importedSession.room && importedSession.date && importedSession.startTime) {
+      candidates = byBlock.get(buildSessionRoomStartKey(importedSession)) || [];
+      // A merged room block may have a later End than an individual course row.
+      // Narrow multiple candidates when possible, but keep the unique block fallback.
+      if (candidates.length > 1 && importedSession.endTime) {
+        candidates = candidates.filter((item) => item.endTime === importedSession.endTime);
+      }
+      if (candidates.length > 1 && courseNames.length) {
+        candidates = candidates.filter((item) => {
+          const known = normalizeCourseNames(item.courseNames?.length ? item.courseNames : item.courseName).map((name) => name.toLowerCase());
+          return courseNames.every((name) => known.includes(name.toLowerCase()));
+        });
+      }
+      if (candidates.length === 1) [session] = candidates;
+    }
 
     if (!session) {
       unmatched.push({
@@ -4555,16 +4996,28 @@ app.post('/api/import/session-needs', (req, res) => {
         start: importedSession.startTime,
         end: importedSession.endTime,
         courses: importedSession.courseName,
+        reason: candidates.length > 1 ? 'ambiguous_session' : 'session_not_found',
       });
       return;
     }
 
     const demand = extractSessionDemand(row, session);
+    // Role needs drive scheduling. Do not retain a stale total from an export.
+    demand.totalNeeded = demand.taNeeded + demand.doctorNeeded;
     session.taNeeded = demand.taNeeded;
     session.doctorNeeded = demand.doctorNeeded;
     session.totalNeeded = demand.totalNeeded;
     updated += 1;
   });
+
+  if (!updated) {
+    return res.status(400).json({
+      error: rejected.length
+        ? 'No session needs updated. Supply non-negative whole numbers in TANeeded and/or DoctorNeeded columns.'
+        : 'No sessions matched. Use an existing SessionID or matching Room, Date and Start values.',
+      updated, unmatched, rejected,
+    });
+  }
 
   return persistStoreResponse(res, store, {
     success: true,
@@ -4572,6 +5025,8 @@ app.post('/api/import/session-needs', (req, res) => {
     sessionNeedsUnmatched: unmatched.length,
     unmatched,
     unmatchedExamples: unmatched.slice(0, 5),
+    rejected,
+    sessionNeedsRejected: rejected.length,
     updated,
   });
 });
@@ -4608,29 +5063,99 @@ app.post('/api/import/invigilators', (req, res) => {
   const store = readStore();
   const rows = readImportRows(req, res, 'Invigilators');
   if (!rows) return;
-  store.invigilators = rows
-    .map((row, index) => normalizeInvigilatorRow(row, index, false))
-    .filter((row) => row.staffId || row.name);
-  store.assignments = [];
-  store.superAssignments = [];
-  store.controlAssignments = [];
-  store.onCallAssignments = [];
-  store.staffHourPolicies = [];
-  store.engagements = [];
-  return persistStoreResponse(res, store, { success: true, count: store.invigilators.length });
+  const prepared = rows.map((row, index) => {
+    const fields = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.trim().toLowerCase().replace(/[\s_-]+/g, ''), value]));
+    return { fields, staffId: String(fields.staffid ?? '').trim(), row: Number(row.__importRow) || index + 2 };
+  });
+  const idRows = new Map();
+  prepared.forEach((item) => {
+    if (!idRows.has(item.staffId)) idRows.set(item.staffId, []);
+    idRows.get(item.staffId).push(item.row);
+  });
+  const existingByStaffId = new Map(store.invigilators.map((person) => [String(person.staffId).trim(), person]));
+  const nextByStaffId = new Map(existingByStaffId);
+  const errors = [];
+  let created = 0;
+  let updated = 0;
+  let unchanged = 0;
+  prepared.forEach(({ fields, staffId, row }) => {
+    try {
+      if (!staffId) throw new Error('StaffID is required. Keep identifiers as text, including leading zeros.');
+      if (idRows.get(staffId).length > 1) throw new Error(`Duplicate StaffID ${staffId} in Excel rows ${idRows.get(staffId).join(', ')}. Each person must have a unique StaffID.`);
+      const existing = existingByStaffId.get(staffId);
+      const name = String(fields.name ?? fields.staffname ?? existing?.name ?? '').trim();
+      if (!name) throw new Error('Name is required.');
+      const rawRole = String(fields.role ?? existing?.role ?? '').trim().toLowerCase();
+      if (!['ta', 'doctor', 'dr', 'doc'].includes(rawRole)) throw new Error('Role is required and must be TA or Doctor.');
+      const role = normalizeRole(rawRole);
+      const rawLoad = String(fields.loadtype ?? existing?.loadType ?? 'full').trim().toLowerCase();
+      if (!['full', 'half'].includes(rawLoad)) throw new Error('LoadType must be full or half.');
+      const maxHours = Number(fields.maxhours ?? existing?.maxHours ?? 0);
+      if (!Number.isFinite(maxHours) || maxHours < 0) throw new Error('MaxHours must be a non-negative number.');
+      if (existing && existing.role !== role) {
+        const linked = ['assignments', 'superAssignments', 'controlAssignments', 'onCallAssignments', 'staffHourPolicies']
+          .some((key) => (store[key] || []).some((item) => item.invigilatorId === existing.id));
+        if (linked) throw new Error('Role cannot change while this staff member has assignments or an hour policy. Review those records first.');
+      }
+      const person = {
+        ...(existing || {}),
+        id: existing?.id || generateId('inv'),
+        staffId, name, role, loadType: rawLoad, maxHours,
+        email: String(fields.email ?? existing?.email ?? '').trim(),
+        department: String(fields.department ?? existing?.department ?? '').trim(),
+        notes: normalizeNotes(fields.notes ?? existing?.notes ?? ''),
+      };
+      nextByStaffId.set(staffId, person);
+      if (!existing) created += 1;
+      else if (['name', 'role', 'loadType', 'maxHours', 'email', 'department', 'notes'].every((key) => existing[key] === person[key])) unchanged += 1;
+      else updated += 1;
+    } catch (error) { errors.push({ row, staffId, error: error.message }); }
+  });
+  if (errors.length) {
+    return res.status(400).json({ success: false, imported: 0, rejected: errors.length, errors, error: `No staff imported. Row ${errors[0].row}: ${errors[0].error}` });
+  }
+  const result = { success: true, imported: created + updated, created, updated, unchanged, rejected: 0, count: nextByStaffId.size };
+  if (!created && !updated) return res.json(result);
+  store.invigilators = Array.from(nextByStaffId.values());
+  return persistStoreResponse(res, store, result);
 });
 
 app.post('/api/import/staff-hour-policies', (req, res) => {
   const store = readStore();
   const rows = readImportRows(req, res, 'Staff hour policies');
   if (!rows) return;
-  const importedPolicies = [];
   const rejected = [];
+  const seenStaff = new Set();
   let updated = 0;
   let created = 0;
+  let unchanged = 0;
 
-  rows.forEach((row, index) => {
+  rows.forEach((source, index) => {
+    const fields = Object.fromEntries(Object.entries(source).map(([key, value]) => [key.trim().toLowerCase().replace(/[\s_-]+/g, ''), value]));
+    const row = {
+      PolicyID: fields.policyid ?? fields.id ?? '',
+      StaffID: fields.staffid ?? '',
+      InvigilatorID: fields.invigilatorid ?? '',
+      Mode: fields.mode ?? fields.policymode ?? '',
+      HoursValue: fields.hoursvalue,
+      ExcludeFromAutoSchedule: fields.excludefromautoschedule ?? '',
+      PreferConsecutiveDuties: fields.preferconsecutiveduties ?? '',
+      PreferConsecutiveDays: fields.preferconsecutivedays ?? '',
+      AllowEngagementOverride: fields.allowengagementoverride ?? 'Yes',
+      Notes: fields.notes ?? '',
+    };
     try {
+      const mode = parseStaffHourPolicyMode(row.Mode);
+      if (['exact', 'add', 'reduce'].includes(mode) && (row.HoursValue === undefined || String(row.HoursValue).trim() === '')) {
+        throw new Error('HoursValue is required for exact, add and reduce modes.');
+      }
+      const flag = String(row.ExcludeFromAutoSchedule).trim().toLowerCase();
+      if (!['', 'yes', 'no', 'true', 'false', '1', '0', 'y', 'n'].includes(flag)) {
+        throw new Error('ExcludeFromAutoSchedule must be Yes/No, True/False or 1/0.');
+      }
+      for (const key of ['PreferConsecutiveDuties', 'PreferConsecutiveDays', 'AllowEngagementOverride']) {
+        if (!['', 'yes', 'no', 'true', 'false', '1', '0', 'y', 'n'].includes(String(row[key]).trim().toLowerCase())) throw new Error(`${key} must be Yes/No, True/False or 1/0.`);
+      }
       const normalized = normalizeStaffHourPolicyInput(store, {
         id: row.PolicyID ?? row.policyId ?? row.id ?? '',
         staffId: row.StaffID ?? row.staffId ?? row.staff_id ?? '',
@@ -4638,34 +5163,64 @@ app.post('/api/import/staff-hour-policies', (req, res) => {
         mode: row.Mode ?? row.mode ?? '',
         hoursValue: row.HoursValue ?? row.hoursValue ?? row.hours_value ?? 0,
         excludeFromAutoSchedule: parseBooleanFlag(row.ExcludeFromAutoSchedule ?? row.excludeFromAutoSchedule ?? ''),
+        preferConsecutiveDuties: parseBooleanFlag(row.PreferConsecutiveDuties),
+        preferConsecutiveDays: parseBooleanFlag(row.PreferConsecutiveDays),
+        allowEngagementOverride: parseBooleanFlag(String(row.AllowEngagementOverride).trim() || 'Yes'),
         notes: row.Notes ?? row.notes ?? '',
       }, String(row.PolicyID ?? row.policyId ?? row.id ?? ''));
-      const existingIndex = (store.staffHourPolicies || []).findIndex((item) => item.id === normalized.id || item.invigilatorId === normalized.invigilatorId);
+      const person = store.invigilators.find((item) => item.id === normalized.invigilatorId);
+      const suppliedStaffId = String(row.StaffID).trim();
+      const suppliedInvigilatorId = String(row.InvigilatorID).trim();
+      if ((suppliedStaffId && suppliedStaffId !== String(person.staffId).trim()) || (suppliedInvigilatorId && suppliedInvigilatorId !== String(person.id))) {
+        throw new Error('StaffID and InvigilatorID refer to different staff.');
+      }
+      if (store.staffHourPolicies.some((item) => item.id === normalized.id && item.invigilatorId !== normalized.invigilatorId)) {
+        throw new Error('PolicyID belongs to a different staff member.');
+      }
+      if (seenStaff.has(normalized.invigilatorId)) throw new Error('Duplicate staff row. Keep one policy row per staff member.');
+      seenStaff.add(normalized.invigilatorId);
+      const existingIndex = store.staffHourPolicies.findIndex((item) => item.invigilatorId === normalized.invigilatorId);
       if (existingIndex >= 0) {
+        normalized.id = store.staffHourPolicies[existingIndex].id;
+        const existing = store.staffHourPolicies[existingIndex];
+        if (['mode', 'hoursValue', 'excludeFromAutoSchedule', 'notes', 'preferConsecutiveDuties', 'preferConsecutiveDays', 'allowEngagementOverride'].every((key) => (existing[key] ?? (key === 'allowEngagementOverride')) === normalized[key])) {
+          unchanged += 1;
+          return;
+        }
         store.staffHourPolicies[existingIndex] = normalized;
         updated += 1;
       } else {
-        importedPolicies.push(normalized);
+        if (normalized.mode === 'default' && normalized.hoursValue === 0 && !normalized.excludeFromAutoSchedule && !normalized.notes && !normalized.preferConsecutiveDuties && !normalized.preferConsecutiveDays && normalized.allowEngagementOverride) {
+          unchanged += 1;
+          return;
+        }
+        store.staffHourPolicies.push(normalized);
         created += 1;
       }
     } catch (error) {
       rejected.push({
-        row: index + 1,
+        row: Number(source.__importRow) || index + 2,
         error: error.message,
         staffId: String(row.StaffID ?? row.staffId ?? '').trim(),
       });
     }
   });
 
-  store.staffHourPolicies = [...(store.staffHourPolicies || []), ...importedPolicies];
-  return persistStoreResponse(res, store, {
+  const result = {
     success: true,
+    rowsRead: rows.length,
     imported: created + updated,
+    created,
     updated,
+    unchanged,
     rejected: rejected.length,
     warnings: [],
     examples: rejected.slice(0, 10),
-  });
+    errors: rejected,
+  };
+  if (rejected.length === rows.length) return res.status(400).json({ ...result, success: false, error: `No policies imported. Row ${rejected[0].row}: ${rejected[0].error}` });
+  if (!created && !updated) return res.json(result);
+  return persistStoreResponse(res, store, result);
 });
 
 app.post('/api/import/engagements', (req, res) => {
@@ -4766,8 +5321,22 @@ app.get('/api/export/staff-hour-policies', (_req, res) => {
   const file = makeWorkbookFile([
     { name: 'StaffHourPolicies', rows: makeStaffHourPolicyRows(store) },
     { name: 'StaffHourPolicyTemplate', rows: makeStaffHourPolicyTemplateRows() },
+    { name: 'Instructions', rows: makeStaffHourPolicyInstructions() },
   ], 'staff_hour_policies_export');
   res.json(file);
+});
+
+app.get('/api/export/staff-hour-policies/template', (_req, res) => {
+  const store = readStore();
+  const rows = makeStaffHourPolicyRows(store).map(({ PolicyID, InvigilatorID, StaffID, Name, Role, Mode, HoursValue, ExcludeFromAutoSchedule, Notes }) => ({
+    PolicyID, InvigilatorID, StaffID, Name, Role, Mode, HoursValue, ExcludeFromAutoSchedule, Notes,
+  }));
+  const blank = { PolicyID: '', InvigilatorID: '', StaffID: '', Name: '', Role: '', Mode: '', HoursValue: '', ExcludeFromAutoSchedule: '', Notes: '' };
+  res.json(makeWorkbookFile([
+    { name: 'StaffHourPolicies', rows: rows.length ? rows : [blank] },
+    { name: 'Instructions', rows: makeStaffHourPolicyInstructions() },
+    { name: 'Examples', rows: makeStaffHourPolicyTemplateRows() },
+  ], 'staff_hour_policy_template'));
 });
 
 app.get('/api/day-coverage', (_req, res) => {
@@ -4883,6 +5452,10 @@ app.get('/api/reports/daily-coverage', (req, res) => {
 
 app.get('/api/reports/room-shortage', (req, res) => {
   res.json(buildRoomShortageReport(readStore(), req.query));
+});
+
+app.get('/api/reports/engagement-overrides', (req, res) => {
+  res.json(buildEngagementOverrideReport(readStore(), req.query));
 });
 
 app.get('/api/reports/conflicts', (req, res) => {
@@ -5026,6 +5599,8 @@ app.post('/api/data/import', (req, res) => {
       : [],
     controlAssignments: [],
     onCallAssignments: [],
+    schedulingConfig: normalizeSchedulingConfig(data.schedulingConfig),
+    onCallConfig: normalizeOnCallConfig(data.onCallConfig),
     staffHourPolicies: []
   };
 
@@ -5100,6 +5675,7 @@ app.post('/api/data/import', (req, res) => {
       endTime: normalizeTime(row.End ?? row.endTime ?? row.end_time),
       invigilatorId: invigilatorByStaffId.get(String(row.invigilatorId || row.staffId || row.StaffID || '').trim()) || String(row.invigilatorId || '').trim(),
       role: String(row.role || row.Role || 'TA').trim() || 'TA',
+      engagementOverrideReason: String(row.engagementOverrideReason || row.EngagementOverrideReason || ''),
     }))
     .filter((row) => invigilatorIds.has(String(row.invigilatorId)) && validOnCallPeriodKeys.has(`${row.date}|${row.startTime}|${row.endTime}`));
 
