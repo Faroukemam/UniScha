@@ -471,9 +471,8 @@ function buildQualityReport(state, comparison = null, options = {}) {
         && (row.roomPlacementType === 'DH' ? session.start === row.start : session.start <= row.start && session.end >= row.end));
     });
     const capacityForGroup = (room) => {
-      const withOverflow = (capacity) => readInt(capacity) + (row.roomPlacementType === 'DH' ? 0 : Math.floor(readInt(capacity) * 0.1 + 1e-9));
-      const major = options.capacityStrategy === 'minor' ? 0 : withOverflow(room.majorCap);
-      const minor = options.capacityStrategy === 'major' ? 0 : withOverflow(room.minorCap);
+      const major = options.capacityStrategy === 'minor' ? 0 : readInt(room.majorCap);
+      const minor = options.capacityStrategy === 'major' ? 0 : readInt(room.minorCap);
       // One group may use one block in each room, never both blocks.
       return Math.max(major, minor);
     };

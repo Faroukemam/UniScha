@@ -1,5 +1,4 @@
 import json
-import math
 import sys
 import time
 from collections import defaultdict
@@ -51,13 +50,6 @@ def room_type_penalty(required_type, room_type, allow_th_fallback):
     if required_type == "TH" and allow_th_fallback and room_type in {"DH", "LAB"}:
         return 1
     return None
-
-
-def overflow_extra(capacity):
-    base = int(capacity or 0)
-    if base <= 0:
-        return 0
-    return int(math.floor(base * 0.10 + 1e-9))
 
 
 def intervals_overlap(a_start, a_end, b_start, b_end):
@@ -399,11 +391,7 @@ def greedy_assignments(groups, eligible_pairs, pair_meta, config):
                     for mode in modes:
                         capacity = int(room["majorCap"] if mode == "Major" else room["minorCap"])
                         total = sum(item[2] for item in overlapping if item[1] == mode)
-                        non_dh = sum(item[2] for item in overlapping
-                                     if item[1] == mode and item[0]["roomPlacementType"] != "DH")
-                        extra = overflow_extra(capacity)
-                        limit = capacity + (min(extra, non_dh) if group["roomPlacementType"] == "DH" else extra)
-                        available = max(0, limit - total)
+                        available = max(0, capacity - total)
                         if available:
                             choices.append((min(remaining, available), -pair_meta[key]["type_penalty"],
                                             -available, key, mode))
@@ -527,8 +515,8 @@ def solve_component(config, courses, availability_rows, rooms, groups):
 
     max_room_total_capacity = max(
         (
-            int(room["majorCap"]) + overflow_extra(room["majorCap"])
-            + int(room["minorCap"]) + overflow_extra(room["minorCap"])
+            int(room["majorCap"])
+            + int(room["minorCap"])
             for room in rooms
         ),
         default=0,
@@ -580,12 +568,12 @@ def solve_component(config, courses, availability_rows, rooms, groups):
             use_room[key] = y
             search_assignment_vars.append((
                 max_students,
-                room["majorCap"] + overflow_extra(room["majorCap"]) + room["minorCap"] + overflow_extra(room["minorCap"]),
+                room["majorCap"] + room["minorCap"],
                 x,
             ))
 
-            major_limit = int(room["majorCap"]) + overflow_extra(int(room["majorCap"]))
-            minor_limit = int(room["minorCap"]) + overflow_extra(int(room["minorCap"]))
+            major_limit = int(room["majorCap"])
+            minor_limit = int(room["minorCap"])
             room_slice_limit = max(0, max(major_limit, minor_limit))
             model.Add(x == x_major + x_minor)
             model.Add(x <= max_students * y)
@@ -641,8 +629,8 @@ def solve_component(config, courses, availability_rows, rooms, groups):
             room_count_terms.append(y)
             tiny_assignment_terms.append(tiny_alloc)
             room_total_capacity = (
-                int(room["majorCap"]) + overflow_extra(room["majorCap"])
-                + int(room["minorCap"]) + overflow_extra(room["minorCap"])
+                int(room["majorCap"])
+                + int(room["minorCap"])
             )
             room_size_penalty = max(0, max_room_total_capacity - room_total_capacity)
             # Strongly prefer opening larger rooms first because they can absorb
@@ -706,33 +694,9 @@ def solve_component(config, courses, availability_rows, rooms, groups):
 
                 major_total = sum(assign_major[key] for key in active_now)
                 minor_total = sum(assign_minor[key] for key in active_now)
-                major_non_dh_total = sum(
-                    assign_major[key] for key in active_now
-                    if pair_meta[key]["group"]["roomPlacementType"] != "DH"
-                )
-                minor_non_dh_total = sum(
-                    assign_minor[key] for key in active_now
-                    if pair_meta[key]["group"]["roomPlacementType"] != "DH"
-                )
-
-                major_capacity = int(room["majorCap"])
-                minor_capacity = int(room["minorCap"])
-                major_extra = overflow_extra(major_capacity)
-                minor_extra = overflow_extra(minor_capacity)
-
-                if major_extra > 0:
-                    major_overflow = model.NewIntVar(0, major_extra, f"major_overflow_{room_key}_{date}_{checkpoint_index}")
-                    model.Add(major_overflow <= major_non_dh_total)
-                    model.Add(major_total <= major_capacity + major_overflow)
-                else:
-                    model.Add(major_total <= major_capacity)
-
-                if minor_extra > 0:
-                    minor_overflow = model.NewIntVar(0, minor_extra, f"minor_overflow_{room_key}_{date}_{checkpoint_index}")
-                    model.Add(minor_overflow <= minor_non_dh_total)
-                    model.Add(minor_total <= minor_capacity + minor_overflow)
-                else:
-                    model.Add(minor_total <= minor_capacity)
+                # Major and Minor are independent blocks, each capped at its imported seats.
+                model.Add(major_total <= int(room["majorCap"]))
+                model.Add(minor_total <= int(room["minorCap"]))
 
     block_pairs = defaultdict(list)
     for key in eligible_pairs:
@@ -750,29 +714,16 @@ def solve_component(config, courses, availability_rows, rooms, groups):
     for (room_key, date, start, end, mode), keys in block_pairs.items():
         room = pair_meta[keys[0]]["room"]
         capacity = int(room["majorCap"] if mode == "Major" else room["minorCap"])
-        extra_capacity = overflow_extra(capacity)
-        max_capacity = capacity + extra_capacity
+        max_capacity = capacity
         if mode == "Major":
             total_expr = sum(assign_major[key] for key in keys)
-            non_dh_expr = sum(
-                assign_major[key] for key in keys
-                if pair_meta[key]["group"]["roomPlacementType"] != "DH"
-            )
         else:
             total_expr = sum(assign_minor[key] for key in keys)
-            non_dh_expr = sum(
-                assign_minor[key] for key in keys
-                if pair_meta[key]["group"]["roomPlacementType"] != "DH"
-            )
         total_var = model.NewIntVar(0, max_capacity, f"block_total_{room_key}_{date}_{start}_{end}_{mode}")
         model.Add(total_var == total_expr)
         used = model.NewBoolVar(f"block_used_{room_key}_{date}_{start}_{end}_{mode}")
         model.Add(total_var <= max_capacity * used)
         model.Add(total_var >= used)
-        if extra_capacity > 0:
-            overflow_used = model.NewIntVar(0, extra_capacity, f"block_overflow_{room_key}_{date}_{start}_{end}_{mode}")
-            model.Add(overflow_used <= non_dh_expr)
-            model.Add(total_var <= capacity + overflow_used)
         diff = model.NewIntVar(-max_capacity, capacity, f"waste_diff_{room_key}_{date}_{start}_{end}_{mode}")
         model.Add(diff == (capacity * used) - total_var)
         waste = model.NewIntVar(0, capacity, f"waste_{room_key}_{date}_{start}_{end}_{mode}")
@@ -795,8 +746,8 @@ def solve_component(config, courses, availability_rows, rooms, groups):
         for room in rooms:
             if room["room"].lower() == room_key:
                 max_capacity = (
-                    room["majorCap"] + overflow_extra(room["majorCap"])
-                    + room["minorCap"] + overflow_extra(room["minorCap"])
+                    room["majorCap"]
+                    + room["minorCap"]
                 )
                 break
         total_var = model.NewIntVar(0, max_capacity, f"physical_total_{room_key}_{date}_{start}_{end}")
@@ -815,8 +766,8 @@ def solve_component(config, courses, availability_rows, rooms, groups):
         max_capacity = 0
         if room:
             max_capacity = (
-                int(room["majorCap"]) + overflow_extra(room["majorCap"])
-                + int(room["minorCap"]) + overflow_extra(room["minorCap"])
+                int(room["majorCap"])
+                + int(room["minorCap"])
             )
         total_expr = sum(physical_totals[key] for key in end_keys)
         room_used = model.NewBoolVar(f"physical_room_used_{room_key}_{date}_{start}")

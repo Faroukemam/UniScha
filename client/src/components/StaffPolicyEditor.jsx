@@ -32,6 +32,6 @@ export default function StaffPolicyEditor({ row, draft, preview, dirty, busy, on
       <label className="policy-note"><span>Policy notes</span><textarea className="form-textarea" rows="3" value={draft.notes} placeholder="Add context for this staff policy" onChange={(event) => onChange('notes', event.target.value)} /></label>
     </fieldset>
     <div className="policy-editor-actions"><button type="button" className="ghost-btn" onClick={onReset} disabled={busy || (!dirty && !draft.id)}>Reset to default</button><button type="button" className="primary-btn" onClick={onSave} disabled={busy || !dirty || (custom && !hoursValid)}>{busy ? 'Please wait...' : 'Save policy'}</button></div>
-    <p className="ops-help">Total hours include session, on-call, control, and super duties.</p>
+    <p className="ops-help">Available periods may remain unused. Hour caps are maximums, not hours that must be filled. Total hours include session, on-call, control, and super duties.</p>
   </aside>;
 }

@@ -92,15 +92,15 @@ async function main() {
     };
     let diagnostic = backend.buildQualityReport(state).shortageDiagnostics[0];
     assert.equal(diagnostic.candidateRooms, 2);
-    assert.equal(diagnostic.totalCompatibleNormalCapacity, 44, 'Count the larger single block, not both blocks');
-    assert.equal(diagnostic.compatibleAutoAvailableCapacity, 22);
+    assert.equal(diagnostic.totalCompatibleNormalCapacity, 40, 'Count the imported single block, without a percentage extension');
+    assert.equal(diagnostic.compatibleAutoAvailableCapacity, 20);
     assert.equal(diagnostic.theoreticallyPlaceable, true);
     assert.equal(diagnostic.shortageReason, 'Room competition or packing');
     diagnostic = backend.buildQualityReport(state, null, { allowThFallback: false }).shortageDiagnostics[0];
     assert.equal(diagnostic.compatibleAutoAvailableCapacity, 0);
     assert.equal(diagnostic.shortageReason, 'One-block capacity limit');
     diagnostic = backend.buildQualityReport(state, null, { capacityStrategy: 'major' }).shortageDiagnostics[0];
-    assert.equal(diagnostic.totalCompatibleNormalCapacity, 33);
+    assert.equal(diagnostic.totalCompatibleNormalCapacity, 30);
     assert.equal(diagnostic.compatibleAutoAvailableCapacity, 0);
   }
   console.log('Course-room backend checks passed: backup rearrangement, stage selection, failure preservation, shortage diagnostics.');

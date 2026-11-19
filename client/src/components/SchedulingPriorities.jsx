@@ -61,7 +61,7 @@ export default function SchedulingPriorities({ disabled, onDirtyChange, onSaved,
     </div>
     <div className="rules-protected">
       <strong>Always protected</strong>
-      <p>Staff roles, hour limits, exclusions, duty conflicts, and preserved assignments. Engagement overrides require permission in each staff policy.</p>
+      <p>Staff roles, hour limits, exclusions, duty conflicts, and preserved assignments. Engagement overrides require permission in each staff policy. Available periods may remain unused; new assignments only fill required session or on-call vacancies.</p>
       <div className="rules-coverage-flow"><span>1. Fill exam duties</span><span aria-hidden="true">&rarr;</span><span>2. Fill on-call duties</span><span aria-hidden="true">&rarr;</span><span>3. Balance total and duty-type hours</span></div>
     </div>
     <div className="rules-subheading"><h3>Preference scoring</h3><p>Coverage and workload balance take priority over these preferences.</p></div>
@@ -83,7 +83,7 @@ export default function SchedulingPriorities({ disabled, onDirtyChange, onSaved,
         </div>
       </li>)}
     </ol>
-    <div className="rules-daily-target"><div><label htmlFor="rules-daily-target">Daily soft target</label><p>A preferred number of duties per person per day. This does not set a hard limit.</p></div><div className="rules-target-input"><input id="rules-daily-target" type="number" min="0" max="20" step="1" value={draft.dailySoftTarget} disabled={controlsDisabled} onChange={(event) => { setDraft({ ...draft, dailySoftTarget: event.target.value === '' ? '' : Number(event.target.value) }); setMessage(''); }} /><span>duties / day</span></div></div>
+    <div className="rules-daily-target"><div><label htmlFor="rules-daily-target">Daily soft target</label><p>Prefer fewer duties above this number. It is neither a required minimum nor a hard limit; free periods can stay unused.</p></div><div className="rules-target-input"><input id="rules-daily-target" type="number" min="0" max="20" step="1" value={draft.dailySoftTarget} disabled={controlsDisabled} onChange={(event) => { setDraft({ ...draft, dailySoftTarget: event.target.value === '' ? '' : Number(event.target.value) }); setMessage(''); }} /><span>duties / day</span></div></div>
     {dirty && (invalidTarget || invalidWeights) ? <p className="rules-feedback is-error" role="alert">{invalidTarget ? 'Enter a whole daily target from 0 to 20.' : 'Use whole point values from 0 to 1,000, with at least one above zero.'}</p> : null}
     <div className="rules-save-bar"><p>Save changes, then generate a new scheduling preview.</p><div className="action-row">
       <button type="button" className="ghost-btn" disabled={controlsDisabled} onClick={() => { setDraft(defaults); setMessage(''); }}>Restore defaults</button>

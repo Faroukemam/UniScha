@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import CourseRoomDetails, { AllocatedRoomCard, CourseRoomPager, PlacementBadge } from '../components/CourseRoomDetails';
+import { filterCourseRoomRows, groupRoomPeriods, isBackupRoom, placementStatusLabels, summarizeCourseRooms } from '../courseRoomView.mjs';
 import * as XLSX from 'xlsx';
 import { api } from '../api';
 import { useToast } from '../App';
@@ -154,13 +156,6 @@ function exportWorkbook(fileName, sheets) {
   XLSX.writeFile(workbook, fileName);
 }
 
-function resultTone(status) {
-  if (status === 'Assigned') return 'success';
-  if (status === 'AssignedWithBackup') return 'warning';
-  if (status === 'CapacityShortage') return 'shortage';
-  return 'danger';
-}
-
 function clampPage(page, totalItems, pageSize) {
   return Math.max(1, Math.min(page, Math.max(1, Math.ceil(totalItems / pageSize))));
 }
@@ -181,149 +176,93 @@ export default function CourseRoomAssignmentPage() {
   const [quality, setQuality] = useState(defaultQuality);
   const [settings, setSettings] = useState(defaultSettings);
   const [loading, setLoading] = useState(true);
-  const [qualityLoading, setQualityLoading] = useState(true);
-  const [running, setRunning] = useState(false);
+  const [action, setAction] = useState('');
+  const [error, setError] = useState('');
+  const [qualityError, setQualityError] = useState('');
+  const [view, setView] = useState('placements');
+  const [filters, setFilters] = useState({ search: '', date: '', type: '', status: '', roomSource: '' });
   const [selectedGroupId, setSelectedGroupId] = useState('');
-  const [manualMode, setManualMode] = useState('Major');
-  const [manualRooms, setManualRooms] = useState([]);
   const [resultsPage, setResultsPage] = useState(1);
   const [roomRowsPage, setRoomRowsPage] = useState(1);
   const [shortagePage, setShortagePage] = useState(1);
+  const sequence = useRef(0);
+  const detailsRef = useRef(null);
+  const busy = loading || Boolean(action);
+  const summary = useMemo(() => summarizeCourseRooms(state), [state]);
+  const ready = state.courses.length > 0 && state.capacities.length > 0;
+  const validBudget = Number.isFinite(Number(settings.timeLimitSeconds)) && Number(settings.timeLimitSeconds) >= 1 && Number(settings.timeLimitSeconds) <= 600;
 
-  async function loadState() {
-    setLoading(true);
-    setQualityLoading(true);
-    try {
-      const response = await api.getCourseRoomAssignment();
-      setState({ ...defaultState, ...response });
-      setLoading(false);
-      try {
-        const qualityResponse = await api.getCourseRoomQuality().catch(() => defaultQuality);
-        setQuality({ ...defaultQuality, ...(qualityResponse || {}) });
-      } finally {
-        setQualityLoading(false);
-      }
-    } catch (error) {
-      showToast(error.message, 'error');
-      setLoading(false);
-      setQualityLoading(false);
-    }
+  function replaceState(response) {
+    setState({ ...defaultState, ...response, summary: { ...defaultState.summary, ...response?.summary } });
+    setSelectedGroupId('');
+    setResultsPage(1); setRoomRowsPage(1); setShortagePage(1);
   }
 
-  useEffect(() => {
-    loadState();
-  }, []);
+  async function loadState() {
+    const request = ++sequence.current;
+    setLoading(true); setError(''); setQualityError(''); api.clearCache();
+    const [saved, analysis] = await Promise.allSettled([api.getCourseRoomAssignment(), api.getCourseRoomQuality()]);
+    if (request !== sequence.current) return;
+    if (saved.status === 'fulfilled') {
+      setState({ ...defaultState, ...saved.value, summary: { ...defaultState.summary, ...saved.value.summary } });
+    } else setError(saved.reason.message);
+    if (analysis.status === 'fulfilled') setQuality({ ...defaultQuality, ...analysis.value });
+    else { setQuality(defaultQuality); setQualityError(analysis.reason.message); }
+    setLoading(false);
+  }
 
-  async function importFile(event, parser, importer, label) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  useEffect(() => { loadState(); return () => { sequence.current += 1; }; }, []);
+  useEffect(() => { if (selectedGroupId) detailsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, [selectedGroupId]);
+
+  async function loadQuality() {
+    try { setQuality({ ...defaultQuality, ...await api.getCourseRoomQuality() }); setQualityError(''); }
+    catch (failure) { setQuality(defaultQuality); setQualityError(failure.message); }
+  }
+
+  async function importFile(event, parser, importer, label, existingCount) {
+    const input = event.target;
+    const file = input.files?.[0];
+    if (!file || busy) return;
+    if ((existingCount || state.results.length) && !window.confirm(`Replace ${label.toLowerCase()}? Current room placement results will be cleared.`)) { input.value = ''; return; }
+    setAction('import'); setError('');
     try {
       const rows = parser(await readRows(file));
       const response = await importer(rows);
-      setState({ ...defaultState, ...(response.state || defaultState) });
-      setQuality(defaultQuality);
-      setResultsPage(1);
-      setRoomRowsPage(1);
-      setShortagePage(1);
-      const count = response.imported ?? rows.length;
+      replaceState(response.state || defaultState); setQuality(defaultQuality); setQualityError('');
       const errorCount = response.errors?.length || 0;
-      showToast(`${label} imported: ${count} valid rows${errorCount ? `, ${errorCount} validation errors` : ''}.`, errorCount ? 'warning' : 'success');
-    } catch (error) {
-      showToast(error.message, 'error');
-    }
-    event.target.value = '';
+      showToast(`${label}: ${response.imported ?? rows.length} rows imported${errorCount ? `, ${errorCount} validation errors` : ''}.`, errorCount ? 'warning' : 'success');
+    } catch (failure) { setError(failure.message); showToast(failure.message, 'error'); }
+    finally { setAction(''); input.value = ''; }
   }
 
   async function runAssignment() {
-    setRunning(true);
+    if (busy || !ready || !validBudget) return;
+    setAction('run'); setError('');
     try {
-      const response = await api.runCourseRoomAssignment(settings);
-      setState({ ...defaultState, ...response });
-      setResultsPage(1);
-      setRoomRowsPage(1);
-      setShortagePage(1);
-      setQualityLoading(true);
-      const qualityResponse = await api.getCourseRoomQuality().catch(() => defaultQuality);
-      setQuality({ ...defaultQuality, ...(qualityResponse || {}) });
-      setQualityLoading(false);
-      showToast('Course Room Assignment completed.', 'success');
-    } catch (error) {
-      showToast(error.message, 'error');
-      setQualityLoading(false);
-    } finally {
-      setRunning(false);
-    }
+      replaceState(await api.runCourseRoomAssignment({ ...settings, timeLimitSeconds: Number(settings.timeLimitSeconds) }));
+      await loadQuality(); setView('placements');
+      showToast('Course room allocation saved.', 'success');
+    } catch (failure) { setError(failure.message); showToast(failure.message, 'error'); }
+    finally { setAction(''); }
   }
 
   async function clearResults() {
+    if (busy || !window.confirm('Clear all saved room placements? Course schedule and room inputs will be kept.')) return;
+    setAction('clear'); setError('');
+    try { replaceState(await api.clearCourseRoomResults()); setQuality(defaultQuality); setQualityError(''); showToast('Room placements cleared.', 'success'); }
+    catch (failure) { setError(failure.message); showToast(failure.message, 'error'); }
+    finally { setAction(''); }
+  }
+
+  async function exportResults(shortagesOnly = false) {
+    if (busy) return;
+    setAction('export');
     try {
-      const response = await api.clearCourseRoomResults();
-      setState({ ...defaultState, ...response });
-      setQuality(defaultQuality);
-      setSelectedGroupId('');
-      setManualRooms([]);
-      setResultsPage(1);
-      setRoomRowsPage(1);
-      setShortagePage(1);
-      showToast('Course Room Assignment results cleared.', 'success');
-    } catch (error) {
-      showToast(error.message, 'error');
-    }
-  }
-
-  async function exportResults() {
-    try {
-      const response = await api.exportCourseRoomAssignment();
-      exportWorkbook('course_room_assignment_results.xlsx', response.sheets || []);
-      showToast('Course Room Assignment workbook exported.', 'success');
-    } catch (error) {
-      showToast(error.message, 'error');
-    }
-  }
-
-  async function exportUnassigned() {
-    try {
-      const response = await api.exportCourseRoomUnassigned();
-      exportWorkbook('course_room_assignment_unassigned.xlsx', response.sheets || []);
-      showToast('Unassigned / shortage workbook exported.', 'success');
-    } catch (error) {
-      showToast(error.message, 'error');
-    }
-  }
-
-  async function submitManualAssignment() {
-    if (!selectedGroupId) return;
-    try {
-      const response = await api.manualAssignCourseRoom({
-        placementGroupId: selectedGroupId,
-        capacityMode: manualMode,
-        rooms: manualRooms,
-        settings,
-      });
-      setState({ ...defaultState, ...response });
-      setQualityLoading(true);
-      const qualityResponse = await api.getCourseRoomQuality().catch(() => defaultQuality);
-      setQuality({ ...defaultQuality, ...(qualityResponse || {}) });
-      setQualityLoading(false);
-      showToast('Manual room assignment saved.', 'success');
-    } catch (error) {
-      showToast(error.message, 'error');
-      setQualityLoading(false);
-    }
-  }
-
-  function toggleManualRoom(room) {
-    setManualRooms((current) => (
-      current.includes(room)
-        ? current.filter((item) => item !== room)
-        : [...current, room]
-    ));
-  }
-
-  function openManual(row) {
-    setSelectedGroupId((current) => current === row.placementGroupId ? '' : row.placementGroupId);
-    setManualMode(row.capacityMode || 'Major');
-    setManualRooms(row.assignedRooms ? row.assignedRooms.split(',').map((item) => item.trim()).filter(Boolean) : []);
+      const response = await (shortagesOnly ? api.exportCourseRoomUnassigned() : api.exportCourseRoomAssignment());
+      exportWorkbook(shortagesOnly ? 'course_room_assignment_unassigned.xlsx' : 'course_room_assignment_results.xlsx', response.sheets || []);
+      showToast('Workbook exported.', 'success');
+    } catch (failure) { showToast(failure.message, 'error'); }
+    finally { setAction(''); }
   }
 
   function downloadTemplate(type) {
@@ -392,512 +331,109 @@ export default function CourseRoomAssignmentPage() {
         { Section: 'Purpose', Instruction: 'Import room capacities for Course Room Assignment.' },
         { Section: 'Columns', Instruction: 'Required columns: Room, MinorCap, MajorCap, RoomType, AutoAvailable.' },
         { Section: 'RoomType', Instruction: 'Allowed values: TH, DH, LAB.' },
-        { Section: 'AutoAvailable', Instruction: 'Use Yes for backup/overflow-capable rooms and No otherwise.' },
+        { Section: 'AutoAvailable', Instruction: 'Use Yes for backup rooms and No otherwise. Imported capacities remain strict limits.' },
       ],
     }]);
   }
 
-  const selectedResult = useMemo(
-    () => state.results.find((item) => item.placementGroupId === selectedGroupId) || null,
-    [state.results, selectedGroupId]
-  );
+  function updateFilter(key, value) {
+    setFilters((current) => ({ ...current, [key]: value }));
+    setResultsPage(1); setRoomRowsPage(1); setShortagePage(1); setSelectedGroupId('');
+  }
+  function clearFilters() {
+    setFilters({ search: '', date: '', type: '', status: '', roomSource: '' });
+    setResultsPage(1); setRoomRowsPage(1); setShortagePage(1); setSelectedGroupId('');
+  }
 
-  const groupedRoomView = useMemo(() => {
-    const map = new Map();
-    state.roomRows.forEach((row) => {
-      const key = `${row.date}|${row.start}|${row.end}`;
-      if (!map.has(key)) {
-        map.set(key, { date: row.date, start: row.start, end: row.end, rooms: [] });
-      }
-      map.get(key).rooms.push(row);
-    });
-    return Array.from(map.values()).sort((a, b) => `${a.date} ${a.start}`.localeCompare(`${b.date} ${b.start}`));
-  }, [state.roomRows]);
-
-  const pagedResults = useMemo(
-    () => paginate(state.results, resultsPage, 25),
-    [state.results, resultsPage]
-  );
-  const pagedRoomPeriods = useMemo(
-    () => paginate(groupedRoomView, roomRowsPage, 12),
-    [groupedRoomView, roomRowsPage]
-  );
-  const pagedShortageDiagnostics = useMemo(
-    () => paginate(quality.shortageDiagnostics || [], shortagePage, 25),
-    [quality.shortageDiagnostics, shortagePage]
-  );
-
-  const solverOutcomeCards = useMemo(() => ([
-    { label: 'Final Strategy', value: quality.stageSummaries?.strategy || 'Not run', tone: 'blue' },
-    { label: 'Why Chosen', value: quality.stageSummaries?.reason || 'No comparison yet', tone: 'purple' },
-    { label: 'Backup Groups', value: quality.autoAvailableUsage?.totalGroupsUsingAutoAvailable ?? 0, tone: 'warning' },
-    { label: 'Backup Students', value: quality.autoAvailableUsage?.totalStudentsAssignedThroughAutoAvailable ?? 0, tone: 'warning' },
-  ]), [quality]);
-
-  const causeRows = useMemo(() => {
-    const rows = [];
-    if (quality.stageSummaries?.finalChosen) {
-      rows.push({
-        title: 'Final chosen strategy',
-        description: `${quality.stageSummaries.strategy || 'Unknown'} because ${quality.stageSummaries.reason || 'no reason recorded'}.`,
-        tone: 'blue',
-      });
-    }
-    if (quality.autoAvailableUsage?.totalGroupsUsingAutoAvailable) {
-      rows.push({
-        title: 'Backup assumption',
-        description: `${quality.autoAvailableUsage.totalGroupsUsingAutoAvailable} groups used AutoAvailable rooms after the normal-room stage could not finish them.`,
-        tone: 'warning',
-      });
-    }
-    if (quality.shortageDiagnostics?.length) {
-      const counts = quality.shortageDiagnostics.reduce((acc, row) => {
-        acc[row.shortageReason] = (acc[row.shortageReason] || 0) + 1;
-        return acc;
-      }, {});
-      Object.entries(counts).forEach(([reason, count]) => {
-        rows.push({
-          title: reason,
-          description: `${count} groups were flagged with this assignment cause.`,
-          tone: reason.includes('Packing') ? 'danger' : reason.includes('AutoAvailable') ? 'warning' : 'purple',
-        });
-      });
-    }
-    return rows;
-  }, [quality]);
-
-  const markers = [
-    { label: 'Course schedule', count: state.courses.length, ready: state.courses.length > 0 },
-    { label: 'Room sessions', count: state.availability.length, ready: state.availability.length > 0 },
-    { label: 'Room capacity', count: state.capacities.length, ready: state.capacities.length > 0 },
-    { label: 'Placement results', count: state.results.length, ready: state.results.length > 0 },
+  const results = useMemo(() => filterCourseRoomRows(state.results, filters), [state.results, filters]);
+  const roomRows = useMemo(() => filterCourseRoomRows(state.roomRows, filters, 'rooms'), [state.roomRows, filters]);
+  const periods = useMemo(() => groupRoomPeriods(roomRows), [roomRows]);
+  const diagnostics = useMemo(() => {
+    const groups = new Map(state.results.map((row) => [row.placementGroupId, row]));
+    const rows = (quality.shortageDiagnostics || []).map((row) => ({ ...row, roomPlacementType: groups.get(row.placementGroupId)?.roomPlacementType }));
+    return filterCourseRoomRows(rows, filters, 'diagnostics');
+  }, [quality.shortageDiagnostics, state.results, filters]);
+  const pagedResults = paginate(results, resultsPage, 25);
+  const pagedPeriods = paginate(periods, roomRowsPage, 8);
+  const pagedDiagnostics = paginate(diagnostics, shortagePage, 20);
+  const selectedResult = state.results.find((row) => row.placementGroupId === selectedGroupId);
+  const selectedRooms = state.roomRows.filter((row) => row.placementGroupId === selectedGroupId);
+  const normalRooms = state.capacities.filter((row) => !isBackupRoom(row)).length;
+  const setupCards = [
+    { title: 'Course schedule', count: state.courses.length, text: 'Courses, student counts, exam times, and linked groups.', columns: 'CourseCode, Students, Date, Start, End, RoomPlacementType, LinkedGroup, LinkedCourses', template: 'schedule', parser: parseScheduleRows, importer: api.importCourseRoomScheduleRows },
+    { title: 'Room availability', count: state.availability.length, text: 'Time windows for normal rooms. Backup rooms can be used without a room-session entry.', columns: 'Room, Date, Start, End', template: 'sessions', parser: parseSessionRows, importer: api.importCourseRoomSessionRows },
+    { title: 'Room capacity', count: state.capacities.length, text: 'Major and Minor seats, room types, and backup-room flags.', columns: 'Room, MinorCap, MajorCap, RoomType, AutoAvailable', template: 'capacity', parser: parseCapacityRows, importer: api.importCourseRoomCapacityRows },
+  ];
+  const navigation = [
+    ['setup', 'Setup', state.courses.length ? 'Inputs loaded' : 'Start here'],
+    ['placements', 'Placements', `${state.results.length} groups`],
+    ['rooms', 'Room allocations', `${state.roomRows.length} allocations`],
+    ['diagnostics', 'Diagnostics', `${(quality.shortageDiagnostics || []).length} shortages`],
   ];
 
-  return (
-    <div className="page-grid course-room-page">
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>Course Room Assignment</h2>
-            <p>Assign linked course groups to available rooms using one Major or Minor block per group in each room, with strict LAB and DH rules and optional backup rooms.</p>
-          </div>
-          <div className="action-row">
-            <button type="button" className="primary-btn" onClick={runAssignment} disabled={running || loading}>
-              {running ? 'Running...' : 'Run Auto Room Assignment'}
-            </button>
-            <button type="button" className="ghost-btn" onClick={clearResults}>Clear Results</button>
-            <button type="button" className="ghost-btn" onClick={exportResults}>Export Results Excel</button>
-            <button type="button" className="ghost-btn" onClick={exportUnassigned}>Export Unassigned / Shortage</button>
-          </div>
-        </div>
+  return <div className="page-grid rules-page course-room-page cr-workspace" aria-busy={busy}>
+    <section className="rules-intro cr-intro"><div><span className="rules-eyebrow">EXAM ROOM PLANNING</span><h2>A place for every course</h2><p>Prepare your rooms, allocate linked course groups, and inspect where every student will sit.</p></div><div className="action-row"><button type="button" className="ghost-btn" onClick={loadState} disabled={busy}>Refresh</button><button type="button" className="primary-btn" onClick={runAssignment} disabled={busy || !ready || !validBudget}>{action === 'run' ? 'Allocating rooms…' : 'Run room assignment'}</button></div></section>
+    {error ? <div className="rules-feedback is-error" role="alert">{error} Saved results shown below may be out of date.</div> : null}
+    {qualityError ? <div className="rules-feedback is-error" role="alert">Diagnostics could not be loaded: {qualityError}. Refresh to try again.</div> : null}
+    {action === 'run' ? <div className="cr-running" role="status"><span className="cr-activity-dot" />Allocating rooms and comparing normal-room and backup options. The result will be saved when complete.</div> : null}
 
-        <div className="upload-marker-grid">
-          {markers.map((marker) => (
-            <div key={marker.label} className={`upload-marker ${marker.ready ? 'ready' : 'waiting'}`}>
-              <div className="upload-marker-dot" />
-              <div>
-                <strong>{marker.label}</strong>
-                <span>{marker.ready ? `${marker.count} loaded` : 'Waiting for data'}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+    <section className="ops-metrics cr-metrics" aria-label="Room assignment summary">
+      {[
+        ['Groups fully placed', `${summary.placedGroups} / ${summary.groups}`, 'Linked courses are counted together'],
+        ['Students without seats', summary.shortage === null ? '—' : summary.shortage, summary.groups ? `${summary.seatedStudents.toLocaleString()} of ${summary.totalStudents.toLocaleString()} students seated` : 'Run an assignment to calculate coverage'],
+        ['Rooms used', summary.usedRooms, 'Distinct physical rooms across all periods'],
+        ['Backup rooms used', summary.backupRooms, `${summary.backupGroups} groups use backup rooms`],
+      ].map(([label, value, note]) => <article className="ops-metric" key={label}><span>{label}</span><strong>{loading ? '…' : value}</strong><small>{note}</small></article>)}
+    </section>
 
-        <div className="capability-import-grid course-room-import-grid">
-          <div className="capability-import-card">
-            <div className="capability-card-head">
-              <strong>Course Schedule</strong>
-              <span>{state.courses.length} rows</span>
-            </div>
-            <small>Columns: CourseCode, Students, Date, Start, End, RoomPlacementType, LinkedGroup, LinkedCourses.</small>
-            <div className="action-row">
-              <label className="ghost-btn course-room-upload-btn">
-                Import Excel
-                <input hidden type="file" accept=".xlsx,.xls" onChange={(event) => importFile(event, parseScheduleRows, api.importCourseRoomScheduleRows, 'Course schedule')} />
-              </label>
-              <button type="button" className="ghost-btn" onClick={() => downloadTemplate('schedule')}>Template</button>
-            </div>
-          </div>
+    <nav className="cr-navigation" aria-label="Course room workspace">{navigation.map(([key, label, note], index) => <button key={key} type="button" aria-pressed={view === key} className={view === key ? 'is-active' : ''} onClick={() => { setView(key); setSelectedGroupId(''); }}><span className="cr-nav-number">0{index + 1}</span><span><strong>{label}</strong><small>{loading ? 'Loading…' : note}</small></span></button>)}</nav>
 
-          <div className="capability-import-card">
-            <div className="capability-card-head">
-              <strong>Room Sessions</strong>
-              <span>{state.availability.length} rows</span>
-            </div>
-            <small>Columns: Room, Date, Start, End. Availability must fully cover the exam interval.</small>
-            <div className="action-row">
-              <label className="ghost-btn course-room-upload-btn">
-                Import Excel
-                <input hidden type="file" accept=".xlsx,.xls" onChange={(event) => importFile(event, parseSessionRows, api.importCourseRoomSessionRows, 'Room sessions')} />
-              </label>
-              <button type="button" className="ghost-btn" onClick={() => downloadTemplate('sessions')}>Template</button>
-            </div>
-          </div>
-
-          <div className="capability-import-card">
-            <div className="capability-card-head">
-              <strong>Room Capacity</strong>
-              <span>{state.capacities.length} rows</span>
-            </div>
-            <small>Columns: Room, MinorCap, MajorCap, RoomType, AutoAvailable.</small>
-            <div className="action-row">
-              <label className="ghost-btn course-room-upload-btn">
-                Import Excel
-                <input hidden type="file" accept=".xlsx,.xls" onChange={(event) => importFile(event, parseCapacityRows, api.importCourseRoomCapacityRows, 'Room capacity')} />
-              </label>
-              <button type="button" className="ghost-btn" onClick={() => downloadTemplate('capacity')}>Template</button>
-            </div>
-          </div>
-        </div>
+    {view === 'setup' ? <>
+      <section className="panel"><div className="panel-head"><div><h2>Prepare the allocation inputs</h2><p>Each import replaces that input list and clears the saved placement results.</p></div><span className={`ops-badge ${ready ? 'tone-success' : 'tone-warning'}`}>{loading ? 'Loading inputs' : ready ? 'Course and capacity inputs loaded' : 'Course schedule and room capacity needed'}</span></div>
+        <div className="cr-import-grid">{setupCards.map((card, index) => <article className="cr-import-card" key={card.title}><div className="panel-head"><span className="cr-import-number">0{index + 1}</span><span className={`ops-badge ${card.count ? 'tone-success' : 'tone-neutral'}`}>{card.count} rows</span></div><h3>{card.title}</h3><p>{card.text}</p><details className="cr-column-help"><summary>Workbook columns</summary><p>{card.columns}</p></details><div className="action-row"><label className={`ghost-btn cr-file-button ${busy ? 'is-disabled' : ''}`}><span>Import Excel</span><input type="file" accept=".xlsx,.xls" aria-label={`Import ${card.title.toLowerCase()}`} disabled={busy} onChange={(event) => importFile(event, card.parser, card.importer, card.title, card.count)} /></label><button type="button" className="ghost-btn" disabled={busy} onClick={() => downloadTemplate(card.template)}>Template</button></div></article>)}</div>
+        <p className="ops-help">{state.capacities.length} rooms in the capacity list · {normalRooms} normal · {state.capacities.length - normalRooms} backup. Availability must cover the exam window; DH rooms also follow the start-time rule.</p>
       </section>
-
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>Settings</h2>
-            <p>These settings affect only the Course Room Assignment solver.</p>
-          </div>
-          <div className="chips-wrap">
-            <span className="info-chip">No 10% overflow</span>
-            <span className="info-chip">Large groups first</span>
-            <span className="info-chip">One block per group per room</span>
-          </div>
-        </div>
-        <div className="form-grid">
-          <label>
-            <span>Use AutoAvailable backup rooms</span>
-            <select value={settings.useAutoAvailableBackup ? 'yes' : 'no'} onChange={(event) => setSettings((current) => ({ ...current, useAutoAvailableBackup: event.target.value === 'yes' }))}>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
-          </label>
-          <label>
-            <span>Group linked courses</span>
-            <select value={settings.groupLinkedCourses ? 'yes' : 'no'} onChange={(event) => setSettings((current) => ({ ...current, groupLinkedCourses: event.target.value === 'yes' }))}>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
-          </label>
-          <label>
-            <span>Allow TH fallback to LAB / DH</span>
-            <select value={settings.allowThFallback ? 'yes' : 'no'} onChange={(event) => setSettings((current) => ({ ...current, allowThFallback: event.target.value === 'yes' }))}>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
-          </label>
-          <label>
-            <span>Capacity selection strategy</span>
-            <select value={settings.capacityStrategy} onChange={(event) => setSettings((current) => ({ ...current, capacityStrategy: event.target.value }))}>
-              <option value="best">Choose Major or Minor in each room</option>
-              <option value="major">Major only</option>
-              <option value="minor">Minor only</option>
-            </select>
-          </label>
-        </div>
+      <section className="panel"><div className="panel-head"><div><h2>Allocation preferences</h2><p>Choose the options for your next run. Existing results stay saved until a new run completes.</p></div><div className="chips-wrap"><span className="ops-badge">Imported capacities are strict limits</span><span className="ops-badge">One block per group per room</span></div></div>
+        <fieldset className="cr-settings" disabled={busy}><legend className="sr-only">Room allocation preferences</legend><div className="cr-setting-toggles">
+          <label><input type="checkbox" checked={settings.useAutoAvailableBackup} onChange={(event) => setSettings((current) => ({ ...current, useAutoAvailableBackup: event.target.checked }))} /><span><strong>Use backup rooms</strong><small>Compare an allocation with AutoAvailable rooms when normal rooms leave shortages.</small></span></label>
+          <label><input type="checkbox" checked={settings.groupLinkedCourses} onChange={(event) => setSettings((current) => ({ ...current, groupLinkedCourses: event.target.checked }))} /><span><strong>Keep linked courses together</strong><small>Place linked courses as a single student group.</small></span></label>
+          <label><input type="checkbox" checked={settings.allowThFallback} onChange={(event) => setSettings((current) => ({ ...current, allowThFallback: event.target.checked }))} /><span><strong>Allow TH fallback</strong><small>TH courses may use LAB or DH rooms when compatible. LAB and DH course restrictions remain enforced.</small></span></label>
+        </div><div className="form-grid cr-setting-fields"><label><span>Capacity selection</span><select value={settings.capacityStrategy} onChange={(event) => setSettings((current) => ({ ...current, capacityStrategy: event.target.value }))}><option value="best">Choose Major or Minor in each room</option><option value="major">Major only</option><option value="minor">Minor only</option></select></label><label><span>Solve budget per stage (seconds)</span><input type="number" min="1" max="600" value={settings.timeLimitSeconds} onChange={(event) => setSettings((current) => ({ ...current, timeLimitSeconds: event.target.value }))} aria-invalid={!validBudget} /><small>1–600 seconds. A backup comparison can require another stage.</small></label></div></fieldset>
+        {!validBudget ? <p className="rules-feedback is-error" role="alert">Enter a solve budget between 1 and 600 seconds.</p> : null}
+        {!state.availability.length && normalRooms > 0 ? <p className="ops-help">Normal rooms need availability windows. Add room availability to make these rooms candidates.</p> : null}
       </section>
+    </> : null}
 
-      <section className="summary-grid">
-        {[
-          { label: 'Total Courses', value: state.summary.totalCourses, tone: 'blue' },
-          { label: 'Placement Groups', value: state.summary.totalPlacementGroups, tone: 'purple' },
-          { label: 'Assigned Groups', value: state.summary.assignedGroups, tone: 'success' },
-          { label: 'Assigned With Backup', value: state.summary.assignedWithBackup, tone: 'warning' },
-          { label: 'Unassigned Groups', value: state.summary.unassignedGroups, tone: 'danger' },
-          { label: 'Capacity Shortage', value: state.summary.capacityShortage, tone: 'warning' },
-          { label: 'Waste Capacity', value: state.summary.totalWasteCapacity, tone: 'blue' },
-          { label: 'Backup Rooms Used', value: state.summary.backupRoomsUsed, tone: 'purple' },
-        ].map((card) => (
-          <div key={card.label} className={`summary-card ${card.tone}`}>
-            <div className="summary-card-value">{loading ? '...' : card.value}</div>
-            <div className="summary-card-label">{card.label}</div>
-          </div>
-        ))}
-      </section>
+    {view !== 'setup' ? <section className="panel cr-register">
+      <div className="panel-head"><div><h2>{view === 'placements' ? 'Course placements' : view === 'rooms' ? 'Room allocations by period' : 'Allocation diagnostics'}</h2><p>{view === 'placements' ? 'Inspect course groups, coverage, and assigned rooms.' : view === 'rooms' ? 'See how Major and Minor blocks are used in each exam window.' : 'Review shortages and compare the normal-room and backup results.'}</p></div><div className="action-row"><button type="button" className="ghost-btn" disabled={busy || !state.results.length} onClick={() => exportResults(false)}>Export full workbook</button><button type="button" className="ghost-btn" disabled={busy || !state.results.length} onClick={() => exportResults(true)}>Export shortages</button></div></div>
+      <div className="form-grid cr-filters"><label><span>Search</span><input type="search" placeholder="Course, group, or room" value={filters.search} onChange={(event) => updateFilter('search', event.target.value)} /></label><label><span>Exam date</span><input type="date" value={filters.date} onChange={(event) => updateFilter('date', event.target.value)} /></label><label><span>Room type</span><select value={filters.type} onChange={(event) => updateFilter('type', event.target.value)}><option value="">All types</option>{['TH', 'DH', 'LAB'].map((type) => <option key={type}>{type}</option>)}</select></label>
+        {view === 'placements' ? <label><span>Placement status</span><select value={filters.status} onChange={(event) => updateFilter('status', event.target.value)}><option value="">All statuses</option>{Object.entries(placementStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : view === 'rooms' ? <label><span>Room source</span><select value={filters.roomSource} onChange={(event) => updateFilter('roomSource', event.target.value)}><option value="">Normal and backup</option><option value="normal">Normal only</option><option value="backup">Backup only</option></select></label> : null}
+        <button type="button" className="ghost-btn cr-clear-filters" onClick={clearFilters}>Clear filters</button>
+      </div><p className="ops-help">Filters apply to this view. Exports include the full saved allocation.</p>
 
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>Solver Visualization</h2>
-            <p>Visual summary of the final solver choice, backup usage, room packing, and assignment causes for this module.</p>
-          </div>
-        </div>
+      {view === 'placements' ? <>
+        <div className="cr-result-count" role="status">{loading ? 'Loading placements…' : `${results.length} matching groups / ${state.results.length} saved groups`}</div>
+        {selectedResult ? <div ref={detailsRef}><CourseRoomDetails result={selectedResult} rooms={selectedRooms} onClose={() => setSelectedGroupId('')} /></div> : null}
+        <div className="table-wrap ops-bounded-table cr-placement-table"><table><thead><tr><th>Course group</th><th>Exam window</th><th>Students</th><th>Assigned rooms</th><th>Coverage</th><th>Status</th><th>Details</th></tr></thead><tbody>{pagedResults.items.map((row) => <tr key={row.placementGroupId} className={selectedGroupId === row.placementGroupId ? 'is-selected' : ''}><td><strong>{row.courseCodes}</strong><small className="ops-cell-note">{row.placementGroupId} · {row.roomPlacementType}</small></td><td>{row.date}<small className="ops-cell-note">{row.start} – {row.end}</small></td><td><strong>{row.totalStudents}</strong></td><td className="cr-assigned-rooms">{row.assignedRooms || 'No room allocated'}<small className="ops-cell-note">{row.capacityMode || 'No block selected'}</small></td><td><strong>{Math.max(0, Number(row.totalStudents || 0) - Number(row.shortage || 0))} seated</strong><small className={`ops-cell-note ${Number(row.shortage) > 0 ? 'cr-shortage' : ''}`}>{row.shortage || 0} without seats</small></td><td><PlacementBadge status={row.status} /></td><td><button type="button" className="ghost-btn" aria-label={`View allocation for ${row.courseCodes}`} aria-expanded={selectedGroupId === row.placementGroupId} onClick={() => setSelectedGroupId((current) => current === row.placementGroupId ? '' : row.placementGroupId)}>{selectedGroupId === row.placementGroupId ? 'Close' : 'View'}</button></td></tr>)}{!results.length ? <tr><td colSpan="7" className="empty-cell">{loading ? 'Loading placements…' : state.results.length ? 'No placements match these filters.' : 'No saved placements. Open Setup to prepare inputs and run an allocation.'}</td></tr> : null}</tbody></table></div>
+        <CourseRoomPager page={pagedResults.page} totalPages={pagedResults.totalPages} total={results.length} onPage={setResultsPage} label="Groups" />
+      </> : null}
 
-        <div className="summary-grid course-room-visual-grid">
-          {solverOutcomeCards.map((card) => (
-            <div key={card.label} className={`summary-card ${card.tone}`}>
-              <div className="summary-card-value course-room-summary-text">{card.value}</div>
-              <div className="summary-card-label">{card.label}</div>
-            </div>
-          ))}
-        </div>
-        {qualityLoading ? <div className="empty-state small">Loading quality analysis...</div> : null}
+      {view === 'rooms' ? <>
+        <div className="cr-result-count" role="status">{roomRows.length} matching allocations across {periods.length} periods</div>
+        <div className="course-room-period-list">{pagedPeriods.items.map((period) => <article className="cr-period" key={`${period.date}|${period.start}|${period.end}`}><div className="panel-head"><div><h3>{period.date}</h3><p>{period.start} – {period.end}</p></div><span className="ops-badge">{new Set(period.rooms.map((room) => room.room)).size} rooms · {period.rooms.length} allocations</span></div><div className="cr-room-grid">{period.rooms.map((room, index) => <AllocatedRoomCard key={`${room.placementGroupId}|${room.room}|${room.capacityMode}|${index}`} room={room} />)}</div></article>)}</div>
+        {!periods.length ? <div className="empty-state">{loading ? 'Loading room allocations…' : state.roomRows.length ? 'No room allocations match these filters.' : 'Run room assignment to see room allocations.'}</div> : null}
+        <CourseRoomPager page={pagedPeriods.page} totalPages={pagedPeriods.totalPages} total={periods.length} onPage={setRoomRowsPage} label="Periods" />
+      </> : null}
 
-        <div className="course-room-visual-layout">
-          <div className="course-room-visual-panel">
-            <div className="course-room-visual-title">Assignment Causes</div>
-            <div className="course-room-cause-list">
-              {causeRows.map((item) => (
-                <div key={item.title} className={`course-room-cause-card ${item.tone}`}>
-                  <strong>{item.title}</strong>
-                  <span>{item.description}</span>
-                </div>
-              ))}
-              {!causeRows.length ? <div className="empty-state">No solver cause data yet.</div> : null}
-            </div>
-          </div>
+      {view === 'diagnostics' ? <>
+        <div className="cr-strategy"><span className="rules-eyebrow">SAVED ALLOCATION</span><h3>{quality.stageSummaries?.strategy === 'BackupEnhanced' ? 'Backup rooms improved the allocation' : quality.stageSummaries?.strategy === 'NormalOnly' ? 'Normal-room allocation selected' : 'No comparison available'}</h3><p>{quality.stageSummaries?.reason || 'Run room assignment to generate a comparison.'}</p><div className="cr-comparison">{[['Normal rooms', quality.stageSummaries?.normalOnly], ['With backup', quality.stageSummaries?.backupEnabled]].map(([label, stage]) => <div key={label}><strong>{label}</strong><span>{stage ? `${stage.totalShortageStudents} students without seats` : 'No saved comparison'}</span></div>)}</div></div>
+        <div className="panel-head cr-subheading"><div><h3>Shortage diagnostics</h3><p>Candidate capacity is a bound before competition with other groups; it does not guarantee a placement.</p></div><span className="ops-badge">{diagnostics.length} matching groups</span></div>
+        <div className="table-wrap ops-bounded-table"><table><thead><tr><th>Course group</th><th>Exam window</th><th>Students without seats</th><th>Candidate rooms</th><th>Normal / backup capacity</th><th>Cause</th></tr></thead><tbody>{pagedDiagnostics.items.map((row) => <tr key={`${row.placementGroupId}|${row.periodInstance}`}><td><strong>{row.courseCodes}</strong><small className="ops-cell-note">{row.placementGroupId}</small></td><td>{row.date}<small className="ops-cell-note">{row.start} – {row.end}</small></td><td><strong className="cr-shortage">{row.shortage}</strong><small className="ops-cell-note">{row.assignedStudents} of {row.totalStudents} seated</small></td><td>{row.candidateRooms}</td><td>{row.totalCompatibleNormalCapacity} / {row.compatibleAutoAvailableCapacity}<small className="ops-cell-note">{row.theoreticallyPlaceable ? 'Capacity covers group before competition' : 'Below group size'}</small></td><td>{row.shortageReason}</td></tr>)}{!diagnostics.length ? <tr><td colSpan="6" className="empty-cell">{loading ? 'Loading diagnostics…' : qualityError ? 'Diagnostics are unavailable. Refresh to try again.' : quality.shortageDiagnostics?.length ? 'No shortage groups match these filters.' : state.results.length && summary.shortage === 0 ? 'All saved groups are fully placed. No student shortages to report.' : 'No shortage diagnostics available. Run an allocation to generate a report.'}</td></tr> : null}</tbody></table></div>
+        <CourseRoomPager page={pagedDiagnostics.page} totalPages={pagedDiagnostics.totalPages} total={diagnostics.length} onPage={setShortagePage} label="Shortages" />
+        <details className="cr-validation" open={state.validationErrors.length > 0}><summary>Input validation · {state.validationErrors.length} messages</summary><div className="table-wrap ops-bounded-table"><table><thead><tr><th>Source</th><th>Row</th><th>Field</th><th>Message</th></tr></thead><tbody>{state.validationErrors.map((row, index) => <tr key={index}><td>{row.source}</td><td>{row.row || '—'}</td><td>{row.field || '—'}</td><td>{row.errorMessage}</td></tr>)}{!state.validationErrors.length ? <tr><td colSpan="4" className="empty-cell">No validation messages in the saved allocation.</td></tr> : null}</tbody></table></div></details>
+      </> : null}
+    </section> : null}
 
-          <div className="course-room-visual-panel">
-            <div className="course-room-visual-title">Top Room Usage</div>
-            <div className="course-room-visual-room-list">
-              {(quality.largerRoomBehavior || []).slice(0, 8).map((row) => (
-                <div key={`${row.room}|${row.date}|${row.start}`} className="course-room-visual-room-card">
-                  <div className="course-room-visual-room-head">
-                    <strong>{row.room}</strong>
-                    <span className={`report-badge ${row.autoAvailable ? 'warning' : 'success'}`}>{row.autoAvailable ? 'Backup' : 'Normal'}</span>
-                  </div>
-                  <span>{row.date} | {row.start}</span>
-                  <span>Major: {row.majorUsed}/{row.majorCap}</span>
-                  <span>Minor: {row.minorUsed}/{row.minorCap}</span>
-                  <span>{row.courseCodes || '-'}</span>
-                </div>
-              ))}
-              {!quality.largerRoomBehavior?.length ? <div className="empty-state">No room usage data yet.</div> : null}
-            </div>
-          </div>
-        </div>
-
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Group</th>
-                <th>Courses</th>
-                <th>Students</th>
-                <th>Assigned</th>
-                <th>Shortage</th>
-                <th>Date</th>
-                <th>Time</th>
-                <th>Candidate Rooms</th>
-                <th>Normal Capacity</th>
-                <th>Backup Capacity</th>
-                <th>Capacity before competition</th>
-                <th>Cause</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedShortageDiagnostics.items.map((row) => (
-                <tr key={`${row.placementGroupId}|${row.periodInstance}`}>
-                  <td>{row.placementGroupId}</td>
-                  <td>{row.courseCodes}</td>
-                  <td>{row.totalStudents}</td>
-                  <td>{row.assignedStudents}</td>
-                  <td>{row.shortage}</td>
-                  <td>{row.date}</td>
-                  <td>{row.start} - {row.end}</td>
-                  <td>{row.candidateRooms}</td>
-                  <td>{row.totalCompatibleNormalCapacity}</td>
-                  <td>{row.compatibleAutoAvailableCapacity}</td>
-                  <td><span className={`report-badge ${row.theoreticallyPlaceable ? 'warning' : 'danger'}`}>{row.theoreticallyPlaceable ? 'Covers group' : 'Below group size'}</span></td>
-                  <td>{row.shortageReason}</td>
-                </tr>
-              ))}
-              {!pagedShortageDiagnostics.items.length ? <tr><td colSpan="12" className="empty-cell">{qualityLoading ? 'Loading shortage diagnostics...' : 'No shortage diagnostics. Current results are fully placed or no report is available yet.'}</td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-        {(quality.shortageDiagnostics || []).length > 25 ? (
-          <div className="action-row">
-            <button type="button" className="ghost-btn" disabled={pagedShortageDiagnostics.page <= 1} onClick={() => setShortagePage((current) => Math.max(1, current - 1))}>Previous</button>
-            <span className="info-chip">Shortages page {pagedShortageDiagnostics.page} / {pagedShortageDiagnostics.totalPages}</span>
-            <button type="button" className="ghost-btn" disabled={pagedShortageDiagnostics.page >= pagedShortageDiagnostics.totalPages} onClick={() => setShortagePage((current) => Math.min(pagedShortageDiagnostics.totalPages, current + 1))}>Next</button>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>Placement Results</h2>
-            <p>Each placement group uses one capacity block per room. It may use Major in one room and Minor in another.</p>
-          </div>
-          <div className="chips-wrap">
-            <span className="info-chip">{loading ? 'Loading...' : `${state.results.length} groups`}</span>
-            {!loading ? <span className="info-chip">Page {pagedResults.page} / {pagedResults.totalPages}</span> : null}
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Group / Course</th>
-                <th>Students</th>
-                <th>Date</th>
-                <th>Time</th>
-                <th>Type</th>
-                <th>Capacity Mode</th>
-                <th>Assigned Rooms</th>
-                <th>Assigned Capacity</th>
-                <th>Waste</th>
-                <th>Shortage</th>
-                <th>Status</th>
-                <th>Notes</th>
-                <th>Manual</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedResults.items.map((row) => (
-                <tr key={row.placementGroupId}>
-                  <td>
-                    <strong>{row.placementGroupId}</strong>
-                    <span className="cell-subtext">{row.courseCodes}</span>
-                  </td>
-                  <td>{row.totalStudents}</td>
-                  <td>{row.date}</td>
-                  <td>{row.start} - {row.end}</td>
-                  <td>{row.roomPlacementType}</td>
-                  <td>{row.capacityMode || '-'}</td>
-                  <td>{row.assignedRooms || '-'}</td>
-                  <td>{row.assignedCapacity}</td>
-                  <td>{row.wasteCapacity}</td>
-                  <td>{row.shortage}</td>
-                  <td><span className={`report-badge ${resultTone(row.status)}`}>{row.status}</span></td>
-                  <td>{row.notes || '-'}</td>
-                  <td>
-                    <button type="button" className="ghost-btn" onClick={() => openManual(row)}>
-                      {selectedGroupId === row.placementGroupId ? 'Close' : 'Manual'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!pagedResults.items.length ? <tr><td colSpan="13" className="empty-cell">{loading ? 'Loading placement results...' : 'No placement results yet.'}</td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-        {state.results.length > 25 ? (
-          <div className="action-row">
-            <button type="button" className="ghost-btn" disabled={pagedResults.page <= 1} onClick={() => setResultsPage((current) => Math.max(1, current - 1))}>Previous</button>
-            <span className="info-chip">Results page {pagedResults.page} / {pagedResults.totalPages}</span>
-            <button type="button" className="ghost-btn" disabled={pagedResults.page >= pagedResults.totalPages} onClick={() => setResultsPage((current) => Math.min(pagedResults.totalPages, current + 1))}>Next</button>
-          </div>
-        ) : null}
-      </section>
-
-      {selectedResult ? (
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Manual Assignment</h2>
-              <p>Editing {selectedResult.placementGroupId} for {selectedResult.courseCodes}. Validation checks room availability, type rules, time conflicts, and single-mode consistency.</p>
-            </div>
-            <div className="action-row">
-              <button type="button" className="primary-btn" onClick={submitManualAssignment}>Save Manual Assignment</button>
-              <button type="button" className="ghost-btn" onClick={() => { setSelectedGroupId(''); setManualRooms([]); }}>Cancel</button>
-            </div>
-          </div>
-
-          <div className="course-room-manual-head">
-            <label className="course-room-mode-picker">
-              <span>Capacity mode</span>
-              <select value={manualMode} onChange={(event) => setManualMode(event.target.value)}>
-                <option value="Major">Major</option>
-                <option value="Minor">Minor</option>
-              </select>
-            </label>
-            <div className="chips-wrap">
-              <span className="info-chip">{selectedResult.date}</span>
-              <span className="info-chip">{selectedResult.start} - {selectedResult.end}</span>
-              <span className="info-chip">{selectedResult.roomPlacementType}</span>
-            </div>
-          </div>
-
-          <div className="course-room-room-grid">
-            {state.capacities.map((room) => {
-              const checked = manualRooms.includes(room.room);
-              const capacityValue = manualMode === 'Major' ? room.majorCap : room.minorCap;
-              return (
-                <label key={room.room} className={`course-room-room-card${checked ? ' selected' : ''}`}>
-                  <div className="course-room-room-card-head">
-                    <strong>{room.room}</strong>
-                    <input type="checkbox" checked={checked} onChange={() => toggleManualRoom(room.room)} />
-                  </div>
-                  <span>Type: {room.roomType}</span>
-                  <span>{manualMode} capacity: {capacityValue}</span>
-                  <span>AutoAvailable: {truthy(room.autoAvailable) ? 'Yes' : 'No'}</span>
-                </label>
-              );
-            })}
-          </div>
-        </section>
-      ) : null}
-
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>Room Rows By Period</h2>
-            <p>Expanded room rows for each solved date and period.</p>
-          </div>
-        </div>
-        <div className="course-room-period-list">
-          {pagedRoomPeriods.items.map((period) => (
-            <div key={`${period.date}|${period.start}|${period.end}`} className="course-room-period-card">
-              <div className="course-room-period-title">{period.date} | {period.start} - {period.end}</div>
-              <div className="course-room-period-grid">
-                {period.rooms.map((room) => (
-                  <div key={`${room.placementGroupId}|${room.room}`} className="course-room-period-room">
-                    <strong>{room.room}</strong>
-                    <span>{room.placementGroupId}</span>
-                    <span>{room.capacityMode} | {room.roomCapacity} seats</span>
-                    <span>Assigned here: {room.studentsAssignedToThisRoom}</span>
-                    <span>Room total: {room.roomTotalAssignedStudentsAtThisTime}</span>
-                    <span>Remaining: {room.roomRemainingCapacityAtThisTime}</span>
-                    <span>AutoAvailable: {truthy(room.autoAvailable) ? 'Yes' : 'No'}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-          {!pagedRoomPeriods.items.length ? <div className="empty-state">{loading ? 'Loading room rows...' : 'No room rows yet.'}</div> : null}
-        </div>
-        {groupedRoomView.length > 12 ? (
-          <div className="action-row">
-            <button type="button" className="ghost-btn" disabled={pagedRoomPeriods.page <= 1} onClick={() => setRoomRowsPage((current) => Math.max(1, current - 1))}>Previous</button>
-            <span className="info-chip">Room periods page {pagedRoomPeriods.page} / {pagedRoomPeriods.totalPages}</span>
-            <button type="button" className="ghost-btn" disabled={pagedRoomPeriods.page >= pagedRoomPeriods.totalPages} onClick={() => setRoomRowsPage((current) => Math.min(pagedRoomPeriods.totalPages, current + 1))}>Next</button>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>Validation Errors</h2>
-            <p>Import and solver validation messages for this module only.</p>
-          </div>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th>Row</th>
-                <th>Field</th>
-                <th>Error message</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.validationErrors.map((row, index) => (
-                <tr key={`${row.source}-${row.row}-${index}`}>
-                  <td>{row.source}</td>
-                  <td>{row.row || '-'}</td>
-                  <td>{row.field || '-'}</td>
-                  <td>{row.errorMessage}</td>
-                </tr>
-              ))}
-              {!state.validationErrors.length ? <tr><td colSpan="4" className="empty-cell">No validation errors.</td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-  );
+    <footer className="cr-footer"><p>{state.results.length ? 'You are viewing saved course room placements.' : 'Prepare your inputs in Setup, then run room assignment.'} {state.validationErrors.length ? `${state.validationErrors.length} validation messages are available in Diagnostics.` : ''}</p><button type="button" className="ghost-btn ops-danger" disabled={busy || !state.results.length} onClick={clearResults}>{action === 'clear' ? 'Clearing…' : 'Clear saved placements'}</button></footer>
+  </div>;
 }

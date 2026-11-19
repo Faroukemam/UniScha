@@ -1,6 +1,45 @@
 # Course room assignment review
 
-Reviewed on 29 October 2026 against the local course-room inputs.
+## Strict imported capacities — 18 November 2026
+
+The course room assignment solver no longer applies a 10% capacity allowance.
+Major and Minor block totals must stay at or below their respective imported
+capacities for TH, DH, and LAB courses, including backup rooms and shared blocks.
+The greedy starting allocation, CP-SAT constraints, capacity bounds, and shortage
+diagnostics use the same strict capacities. For example, a 50-seat block can seat
+at most 50 students, leaving a shortage of 5 for a group of 55.
+
+Saved placements are not rewritten by this code change. Restart the backend to
+load the updated diagnostic code, then run Course Room Assignment again to
+produce a saved allocation under the new limits. Older saved quality comparisons
+describe the earlier allocation until a new run is completed.
+
+Verification includes 17 Python regression tests, backend shortage-diagnostic
+checks, frontend rendering checks, and a production build.
+
+## UI update — 18 November 2026
+
+The workspace now separates Setup, Placements, Room allocations, and Diagnostics.
+Search, date, type, status, and room-source filters apply to the displayed view;
+exports retain the complete saved allocation. Allocation details distinguish
+students in one allocation, shared block totals, remaining block seats, and
+physical room totals. Backup room metrics count distinct physical rooms rather
+than placement groups. Before a run exists, shortage figures remain uncalculated.
+
+The unsupported Manual save flow was replaced with a View allocation control.
+Imports and clearing results ask for confirmation, pending operations disable
+conflicting actions, and load/diagnostic failures are visible. Solver rules and
+saved allocations were not changed by this UI update.
+
+UI verification: `node server/scripts/verify_course_room_view.cjs`,
+`node server/scripts/verify_ui_render.cjs`, and the frontend production build.
+These checks cover derived counts, filters, loaded allocation details, initial
+page rendering, and bundling; browser layout/interaction testing is separate.
+
+## Historical review — 29 October 2026
+
+The findings and saved-run figures below describe the earlier implementation,
+which still included the capacity allowance removed above.
 
 ## Findings
 

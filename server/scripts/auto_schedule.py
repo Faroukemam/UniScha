@@ -598,7 +598,32 @@ def build_candidates(sessions, staff, indices):
     return candidates, candidates_by_session_role, candidates_by_staff, sorted(excluded_staff_skipped)
 
 
+def validate_demand_driven_assignments(sessions, assignments):
+    """Free time permits work; it never creates extra staffing demand.
+
+    Preserve supplied locked duties, including an already overstaffed period,
+    while preventing any new assignment beyond the remaining required slots.
+    This also checks results rebuilt after continuity exchanges.
+    """
+    counts = defaultdict(lambda: {"locked": 0, "generated": 0})
+    for row in assignments:
+        key = (row["session_id"], row["role"])
+        counts[key]["locked" if row.get("locked") else "generated"] += 1
+    for duty in sessions:
+        for role, field in (("TA", "ta_needed"), ("Doctor", "doctor_needed")):
+            count = counts[(duty["id"], role)]
+            vacancies = max(0, int(duty[field]) - count["locked"])
+            if count["generated"] > vacancies:
+                raise ScheduleConstraintError(
+                    "Automatic assignments exceed required staffing. Available time is optional.",
+                    [{"session_id": duty["id"], "role": role,
+                      "required": int(duty[field]), "preserved": count["locked"],
+                      "generated": count["generated"]}],
+                )
+
+
 def build_result_payload(status, sessions, staff, assignments, uncovered_sessions, load_minutes_by_staff, policy_summary=None, explanation=None, excluded_staff_skipped=None):
+    validate_demand_driven_assignments(sessions, assignments)
     policy_summary = policy_summary or {
         "raw_average_hours_by_role": {"TA": 0, "Doctor": 0},
         "effective_policy_by_staff": {},

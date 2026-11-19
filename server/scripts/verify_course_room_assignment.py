@@ -41,7 +41,6 @@ def solve(courses, rooms, availability=None, locked=None, **settings):
 
 def assert_invariants(result, rooms):
     capacities = {row["room"]: row for row in rooms}
-    group_types = {row["placementGroupId"]: row["roomPlacementType"] for row in result["results"]}
     by_group = defaultdict(list)
     by_room = defaultdict(list)
     for row in result["roomRows"]:
@@ -58,15 +57,13 @@ def assert_invariants(result, rooms):
             assert len({(row["start"], row["end"]) for row in active}) <= 1, "Conflicting room windows"
             for mode, field in (("Major", "majorCap"), ("Minor", "minorCap")):
                 used = sum(row["studentsAssignedToThisRoom"] for row in active if row["capacityMode"] == mode)
-                non_dh = sum(row["studentsAssignedToThisRoom"] for row in active
-                             if row["capacityMode"] == mode and group_types[row["placementGroupId"]] != "DH")
-                assert used <= capacities[name][field] + min(assignment.overflow_extra(capacities[name][field]), non_dh)
+                assert used <= capacities[name][field], "An allocation exceeded the imported block capacity"
 
 
 class CourseRoomAssignmentTests(unittest.TestCase):
     def test_one_block_per_group_per_room(self):
         result = solve([course("A", 60)], [room()])
-        self.assertEqual(result["results"][0]["shortage"], 16)
+        self.assertEqual(result["results"][0]["shortage"], 20)
 
     def test_different_groups_can_use_both_blocks(self):
         result = solve([course("A", 40), course("B", 30)], [room()])
@@ -99,10 +96,33 @@ class CourseRoomAssignmentTests(unittest.TestCase):
 
     def test_shared_block_capacity_is_not_duplicated(self):
         result = solve([course("A", 30), course("B", 30)], [room(major=0, minor=50)])
-        self.assertEqual(sum(row["shortage"] for row in result["results"]), 5)
+        self.assertEqual(sum(row["shortage"] for row in result["results"]), 10)
 
-    def test_dh_does_not_use_overflow(self):
-        result = solve([course("A", 55, kind="DH")], [room(kind="DH", major=0, minor=50)])
+    def test_every_room_type_respects_imported_capacity(self):
+        for kind in ("TH", "DH", "LAB"):
+            with self.subTest(kind=kind):
+                result = solve([course("A", 55, kind=kind)], [room(kind=kind, major=0, minor=50)])
+                self.assertEqual(result["results"][0]["shortage"], 5)
+                self.assertEqual(result["roomRows"][0]["roomCapacity"], 50)
+
+    def test_major_and_minor_modes_have_no_capacity_extension(self):
+        for mode in ("major", "minor", "best"):
+            with self.subTest(mode=mode):
+                result = solve([course("A", 110)], [room(major=100, minor=100)], capacityStrategy=mode)
+                self.assertEqual(result["results"][0]["shortage"], 10)
+
+    def test_multiple_rooms_cannot_hide_extra_capacity(self):
+        result = solve([course("A", 110)], [room("R1", major=0, minor=50), room("R2", major=0, minor=50)])
+        self.assertEqual(result["results"][0]["shortage"], 10)
+        self.assertEqual(sum(row["studentsAssignedToThisRoom"] for row in result["roomRows"]), 100)
+
+    def test_timeout_starting_layout_obeys_exact_capacity(self):
+        original_solve = assignment.cp_model.CpSolver.Solve
+        def timeout_optimization(solver, model):
+            return assignment.cp_model.UNKNOWN if solver.parameters.num_search_workers == 4 else original_solve(solver, model)
+        with patch.object(assignment.cp_model.CpSolver, "Solve", timeout_optimization):
+            result = solve([course("A", 55)], [room(major=0, minor=50)])
+        self.assertEqual(result["status"], "FEASIBLE")
         self.assertEqual(result["results"][0]["shortage"], 5)
 
     def test_th_fallback_setting_is_respected(self):
@@ -111,7 +131,7 @@ class CourseRoomAssignmentTests(unittest.TestCase):
 
     def test_capacity_strategy_and_backup_setting_are_respected(self):
         result = solve([course("A", 40)], [room()], capacityStrategy="major")
-        self.assertEqual(result["results"][0]["shortage"], 7)
+        self.assertEqual(result["results"][0]["shortage"], 10)
         result = solve([course("A", 40)], [room()], useAutoAvailableBackup=False)
         self.assertEqual(result["results"][0]["shortage"], 40)
 
